@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <vulkan/vulkan_core.h>
 #include <stdint.h>
+#include <vector>
+#include <string.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -11,6 +13,16 @@
 
 #define WIDTH 480
 #define HEIGHT 480
+
+const std::vector<const char*> validation_layers = {
+    "VK_LAYER_KHRONOS_validation"
+};
+
+#ifdef NDEBUG
+    const bool enable_validation_layers = false;
+#else
+    const bool enable_validation_layers = true;
+#endif
 
 // Candy is our renderer
 typedef struct {
@@ -23,9 +35,35 @@ typedef struct {
 
 } Candy;
 
+bool checkValidationLayerSupport() {
+    uint32_t layer_count;
+    vkEnumerateInstanceLayerProperties(&layer_count, nullptr);
 
+    std::vector<VkLayerProperties> available_layers(layer_count);
+    vkEnumerateInstanceLayerProperties(&layer_count, available_layers.data());
+
+    for (const char* layer_name: validation_layers) {
+        bool layer_found = false;
+
+        for (const auto& layer_props : available_layers) {
+            if (strcmp(layer_name, layer_props.layerName) == 0) {
+                layer_found = true;
+                break;
+            }
+        }
+        if (!layer_found) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 void candy_init(Candy* candy) {
+    
+    if (enable_validation_layers && !checkValidationLayerSupport()) {
+        throw std::runtime_error("validation layers requested, but not available!");
+    }
 
     glfwInit();
 
@@ -59,15 +97,21 @@ void candy_init(Candy* candy) {
         .enabledExtensionCount = glfwExtensionCount,
         .ppEnabledExtensionNames = glfwExtensions,
     };
+    if (enable_validation_layers) {
+        create_info.enabledLayerCount = static_cast<uint32_t>(validation_layers.size());
+        create_info.ppEnabledLayerNames = validation_layers.data();
+    } else {
+        create_info.enabledLayerCount = 0;
+    }
 
     
 
 
     VkResult result = vkCreateInstance(&create_info, nullptr, &candy->instance);
     if (result != VK_SUCCESS) {
+        std::cerr << "Vulkan instance creation failed with error code: " << result << std::endl;
         throw std::runtime_error("failed to create vulkan instance");
     }
-
 }
 
 void candy_loop(Candy* candy) {

@@ -27,6 +27,7 @@ typedef struct candy_config {
 typedef struct {
     GLFWwindow *window;
     VkInstance instance;
+    VkDebugUtilsMessengerEXT debug_messenger;
 } candy_ctx;
 
 // Candy is our renderer
@@ -40,6 +41,45 @@ typedef struct {
     candy_ctx ctx;
 
 } Candy;
+
+// It is not automatically loaded. We have to look up its address ourselves using
+// vkGetInstanceProcAddr
+VkResult CreateDebugUtilsMessengerEXT(
+    VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkDebugUtilsMessengerEXT *pDebugMessenger) {
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+        instance, "vkCreateDebugUtilsMessengerEXT");
+    if (func != nullptr) {
+        return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
+    } else {
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+}
+
+void DestroyDebugUtilsMessengerEXT(VkInstance instance,
+                                   VkDebugUtilsMessengerEXT debugMessenger,
+                                   const VkAllocationCallbacks *pAllocator) {
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+        instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (func != nullptr) {
+        func(instance, debugMessenger, pAllocator);
+    }
+}
+
+// TODO: determine what needs to be logged, what severity etc
+static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+    VkDebugUtilsMessageTypeFlagsEXT message_type,
+    const VkDebugUtilsMessengerCallbackDataEXT *p_callback_data, void *p_user_data) {
+
+    (void)message_severity;
+    (void)message_type;
+    (void)p_user_data;
+
+    std::cerr << "validation layer: " << p_callback_data->pMessage << std::endl;
+
+    return VK_FALSE;
+}
 
 bool check_validation_layer_support() {
     uint32_t layer_count;
@@ -107,7 +147,7 @@ void candy_init(Candy *candy) {
     };
 
     std::vector<const char *> extensions = get_required_extensions(&candy->cfg);
-    VkInstanceCreateInfo create_info = {
+    VkInstanceCreateInfo create_instance_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
@@ -118,17 +158,38 @@ void candy_init(Candy *candy) {
         .ppEnabledExtensionNames = extensions.data(),
     };
     if (candy->cfg.enable_validation_layers) {
-        create_info.enabledLayerCount = static_cast<uint32_t>(validation_layers.size());
-        create_info.ppEnabledLayerNames = validation_layers.data();
+        create_instance_info.enabledLayerCount =
+            static_cast<uint32_t>(validation_layers.size());
+        create_instance_info.ppEnabledLayerNames = validation_layers.data();
     } else {
-        create_info.enabledLayerCount = 0;
+        create_instance_info.enabledLayerCount = 0;
     }
 
-    VkResult result = vkCreateInstance(&create_info, nullptr, &candy->ctx.instance);
+    VkResult result =
+        vkCreateInstance(&create_instance_info, nullptr, &candy->ctx.instance);
     if (result != VK_SUCCESS) {
         std::cerr << "Vulkan instance creation failed with error code: " << result
                   << std::endl;
         throw std::runtime_error("failed to create vulkan instance");
+    }
+
+    // Setup for debug_messenger
+    VkDebugUtilsMessengerCreateInfoEXT create_messenger_info {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .flags = 0,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debug_callback,
+        .pUserData = nullptr,
+    };
+    if (CreateDebugUtilsMessengerEXT(candy->ctx.instance, &create_messenger_info, nullptr,
+                                     &candy->ctx.debug_messenger) != VK_SUCCESS) {
+        throw std::runtime_error("failed to set up debug messenger!");
     }
 }
 
@@ -139,6 +200,10 @@ void candy_loop(Candy *candy) {
 }
 
 void candy_cleanup(Candy *candy) {
+    if (candy->cfg.enable_validation_layers) {
+        DestroyDebugUtilsMessengerEXT(candy->ctx.instance, candy->ctx.debug_messenger,
+                                      nullptr);
+    }
     vkDestroyInstance(candy->ctx.instance, nullptr);
 
     glfwDestroyWindow(candy->ctx.window);

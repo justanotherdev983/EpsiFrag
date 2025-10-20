@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <stdint.h>
 #include <string.h>
@@ -13,7 +14,7 @@
 
 const std::vector<const char *> validation_layers = {"VK_LAYER_KHRONOS_validation"};
 
-typedef struct candy_config {
+struct candy_config {
     uint32_t width = 480;
     uint32_t height = 480;
 
@@ -22,16 +23,17 @@ typedef struct candy_config {
 #else
     const bool enable_validation_layers = true;
 #endif
-} candy_config;
+};
 
-typedef struct {
+struct candy_ctx {
     GLFWwindow *window;
     VkInstance instance;
     VkDebugUtilsMessengerEXT debug_messenger;
-} candy_ctx;
+    VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+};
 
 // Candy is our renderer
-typedef struct {
+struct Candy {
     // We need our vulkan specific context here, so our swap chain, our shaders,
     // pipeline ETC
     void *frag_shader;
@@ -39,8 +41,45 @@ typedef struct {
 
     candy_config cfg;
     candy_ctx ctx;
+};
 
-} Candy;
+struct queue_family_indices {
+    std::optional<uint32_t> graphics_family;
+};
+
+queue_family_indices find_queue_families(VkPhysicalDevice device) {
+    queue_family_indices indices;
+
+    uint32_t queue_family_count;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
+
+    std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count,
+                                             queue_families.data());
+
+    int i = 0;
+    for (const auto &queue_family : queue_families) {
+        if (queue_family.queueFlags == VK_QUEUE_GRAPHICS_BIT) {
+            indices.graphics_family = i;
+        }
+
+        if (indices.graphics_family.has_value()) {
+            break;
+        }
+
+        i++;
+    }
+
+    return indices;
+}
+
+// for now we just care about vulkan support in GPU. Later we can make a
+// system to choose best suitable GPU
+bool is_phys_device_suitable(VkPhysicalDevice device) {
+    queue_family_indices indices = find_queue_families(device);
+
+    return indices.graphics_family.has_value();
+}
 
 // It is not automatically loaded. We have to look up its address ourselves using
 // vkGetInstanceProcAddr
@@ -79,6 +118,23 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
     std::cerr << "validation layer: " << p_callback_data->pMessage << std::endl;
 
     return VK_FALSE;
+}
+
+VkDebugUtilsMessengerCreateInfoEXT create_debug_messenger_create_info() {
+    VkDebugUtilsMessengerCreateInfoEXT create_messenger_info = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .pNext = nullptr,
+        .flags = 0,
+        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debug_callback,
+        .pUserData = nullptr,
+    };
+    return create_messenger_info;
 }
 
 bool check_validation_layer_support() {
@@ -161,6 +217,9 @@ void candy_init(Candy *candy) {
         create_instance_info.enabledLayerCount =
             static_cast<uint32_t>(validation_layers.size());
         create_instance_info.ppEnabledLayerNames = validation_layers.data();
+        VkDebugUtilsMessengerCreateInfoEXT debug_create_info =
+            create_debug_messenger_create_info();
+        create_instance_info.pNext = &debug_create_info;
     } else {
         create_instance_info.enabledLayerCount = 0;
     }
@@ -173,23 +232,35 @@ void candy_init(Candy *candy) {
         throw std::runtime_error("failed to create vulkan instance");
     }
 
-    // Setup for debug_messenger
-    VkDebugUtilsMessengerCreateInfoEXT create_messenger_info {
-        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        .pNext = nullptr,
-        .flags = 0,
-        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-        .pfnUserCallback = debug_callback,
-        .pUserData = nullptr,
-    };
-    if (CreateDebugUtilsMessengerEXT(candy->ctx.instance, &create_messenger_info, nullptr,
-                                     &candy->ctx.debug_messenger) != VK_SUCCESS) {
-        throw std::runtime_error("failed to set up debug messenger!");
+    if (candy->cfg.enable_validation_layers) {
+        VkDebugUtilsMessengerCreateInfoEXT messenger_info =
+            create_debug_messenger_create_info();
+        if (CreateDebugUtilsMessengerEXT(candy->ctx.instance, &messenger_info, nullptr,
+                                         &candy->ctx.debug_messenger) != VK_SUCCESS) {
+            throw std::runtime_error("failed to set up debug messenger!");
+        }
+    }
+
+    // --- Pick a physical device
+
+    uint32_t device_count;
+    vkEnumeratePhysicalDevices(candy->ctx.instance, &device_count, nullptr);
+
+    if (!device_count) {
+        throw std::runtime_error("failed to find GPUs with vulkan support");
+    }
+    std::vector<VkPhysicalDevice> devices(device_count);
+    vkEnumeratePhysicalDevices(candy->ctx.instance, &device_count, devices.data());
+
+    for (const auto &device : devices) {
+        if (is_phys_device_suitable(device)) {
+            candy->ctx.physical_device = device;
+            break;
+        }
+    }
+
+    if (candy->ctx.physical_device == VK_NULL_HANDLE) {
+        throw std::runtime_error("failed to find suitable GPU");
     }
 }
 

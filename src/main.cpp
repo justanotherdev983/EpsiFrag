@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
@@ -276,6 +277,55 @@ void candy_queury_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surfac
     }
 }
 
+void candy_choose_swap_surface_format(VkSurfaceFormatKHR *surface_fmt,
+                                      const VkSurfaceFormatKHR *available_formats,
+                                      uint32_t format_count) {
+
+    for (uint32_t i = 0; i < format_count; ++i) {
+        if (available_formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
+            available_formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            *surface_fmt = available_formats[i];
+        }
+    }
+
+    // If that fails we will just use the first available one
+    *surface_fmt = available_formats[0];
+}
+
+void candy_choose_swap_present_mode(VkPresentModeKHR *present_mode,
+                                    const VkPresentModeKHR *available_present_modes,
+                                    uint32_t present_mode_count) {
+    for (uint32_t i = 0; i < present_mode_count; ++i) {
+        if (available_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+            *present_mode =
+                VK_PRESENT_MODE_FIFO_KHR; // Probably best, the triple buffer solution
+        }
+    }
+
+    *present_mode = VK_PRESENT_MODE_FIFO_KHR; // Guaranteed to be available if other fails
+}
+
+void candy_choose_swap_extent(VkExtent2D *extent,
+                              const VkSurfaceCapabilitiesKHR &capabilities,
+                              const GLFWwindow *window) {
+    if (capabilities.currentExtent.width != UINT32_MAX) {
+        *extent = capabilities.currentExtent;
+    } else {
+        int width;
+        int height;
+
+        glfwGetFramebufferSize((GLFWwindow *)window, &width, &height);
+
+        extent->width = (uint32_t)width;
+        extent->height = (uint32_t)height;
+
+        extent->width = std::clamp(extent->width, capabilities.minImageExtent.width,
+                                   capabilities.maxImageExtent.width);
+        extent->height = std::clamp(extent->height, capabilities.minImageExtent.height,
+                                    capabilities.maxImageExtent.height);
+    }
+}
+
 // ============================================================================
 // DEVICE SELECTION
 // ============================================================================
@@ -493,6 +543,8 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
     vkGetDeviceQueue(frame_data->logical_device, frame_data->present_queue_family, 0,
                      &frame_data->present_queue);
 }
+
+void candy_init_swapchain() {}
 
 // ============================================================================
 // PUBLIC API

@@ -544,7 +544,47 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
                      &frame_data->present_queue);
 }
 
-void candy_init_swapchain() {}
+void candy_init_swapchain(VkPhysicalDevice device, VkSurfaceKHR surface,
+                          const GLFWwindow *window) {
+    candy_swapchain_support_details swapchain_details = {};
+    candy_queury_swapchain_support(device, surface, &swapchain_details);
+
+    VkSurfaceFormatKHR surface_fmt = {};
+    candy_choose_swap_surface_format(swapchain_details.formats, &surface_fmt,
+                                     swapchain_details.format_count);
+
+    VkPresentModeKHR present_mode = {};
+    candy_choose_swap_present_mode(&present_mode, swapchain_details.present_modes,
+                                   swapchain_details.present_mode_count);
+
+    VkExtent2D extent = {};
+    candy_choose_swap_extent(&extent, swapchain_details.capabilities,
+                             (GLFWwindow *)window);
+
+    uint32_t image_count = swapchain_details.capabilities.minImageCount +
+                           1; // +1 bcuz if its minImageCount we have to wait on driver
+
+    if (swapchain_details.capabilities.maxImageCount > 0 &&
+        image_count > swapchain_details.capabilities.maxImageCount) {
+        image_count = swapchain_details.capabilities.maxImageCount;
+    }
+
+    VkSwapchainCreateInfoKHR create_info = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = nullptr,
+        .flags = 0,
+        .surface = surface,
+        .minImageCount = image_count,
+        .imageFormat = surface_fmt.format,
+        .imageColorSpace = surface_fmt.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,                             // We dont need other
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // Bcuz we dont do things like
+                                                           // post-processing
+    };
+
+    // TODO: Fill in the rest of the struct...
+}
 
 // ============================================================================
 // PUBLIC API
@@ -576,6 +616,8 @@ void candy_init(candy_renderer *candy) {
                        &candy->vk_instance); // Create surface before picking device
     candy_init_physical_device(&candy->frame_data, &candy->vk_instance);
     candy_init_logical_device(&candy->frame_data, &candy->config);
+    candy_init_swapchain(candy->frame_data.physical_device, candy->frame_data.surface,
+                         (const GLFWwindow *)&candy->frame_data.window);
 
     std::cout << "[CANDY] Init complete\n";
 }

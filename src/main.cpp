@@ -26,6 +26,11 @@
 
 constexpr const char *VALIDATION_LAYERS[] = {"VK_LAYER_KHRONOS_validation"};
 constexpr size_t VALIDATION_LAYER_COUNT = 1;
+
+// Device extensions required for rendering
+constexpr const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+constexpr size_t DEVICE_EXTENSION_COUNT = 1;
+
 constexpr uint32_t INVALID_QUEUE_FAMILY = UINT32_MAX;
 
 #ifdef NDEBUG
@@ -50,11 +55,13 @@ struct candy_config {
 // Hot data - accessed every frame (cache-line aligned)
 struct alignas(64) candy_frame_data {
     GLFWwindow *window;
+    VkSurfaceKHR surface;
     VkPhysicalDevice physical_device;
     VkDevice logical_device;
     VkQueue graphics_queue;
+    VkQueue present_queue;
     uint32_t graphics_queue_family;
-    char _padding[28]; // Explicit padding to prevent false sharing
+    uint32_t present_queue_family;
 };
 
 // Vulkan instance handles
@@ -74,7 +81,23 @@ struct candy_renderer {
 struct candy_device_list {
     VkPhysicalDevice handles[16];
     uint32_t graphics_queue_families[16];
+    uint32_t present_queue_families[16]; // ADD: store present queue families too
     uint32_t count;
+};
+
+// Helper for storing queue family indices
+struct candy_queue_family_indices {
+    uint32_t graphics_family;
+    uint32_t present_family;
+};
+
+// Helper for swapchain init
+struct candy_swapchain_support_details {
+    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceFormatKHR formats[32];
+    uint32_t format_count;
+    VkPresentModeKHR present_modes[16];
+    uint32_t present_mode_count;
 };
 
 // ============================================================================
@@ -182,29 +205,116 @@ void candy_get_required_extensions(const char **out_extensions, uint32_t *out_co
 // QUEUE FAMILIES
 // ============================================================================
 
-uint32_t candy_find_graphics_queue_family(VkPhysicalDevice device) {
+bool candy_queue_families_is_complete(const candy_queue_family_indices *indices) {
+    return indices->graphics_family != INVALID_QUEUE_FAMILY &&
+           indices->present_family != INVALID_QUEUE_FAMILY;
+}
+
+candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
+                                                     VkSurfaceKHR surface) {
+    candy_queue_family_indices indices = {
+        .graphics_family = INVALID_QUEUE_FAMILY,
+        .present_family = INVALID_QUEUE_FAMILY,
+    };
+
     uint32_t queue_family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
 
-    VkQueueFamilyProperties queue_families[32];
+    // Limit to a reasonable number to stay on the stack
     if (queue_family_count > 32)
         queue_family_count = 32;
-
+    VkQueueFamilyProperties queue_families[32];
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families);
 
     for (uint32_t i = 0; i < queue_family_count; ++i) {
+        // Check for graphics support
         if (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            return i;
+            indices.graphics_family = i;
+        }
+
+        // Check for presentation support
+        VkBool32 present_support = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_support);
+        if (present_support) {
+            indices.present_family = i;
+        }
+
+        // If we've found everything we need, we can stop searching
+        if (candy_queue_families_is_complete(&indices)) {
+            break;
         }
     }
-    return INVALID_QUEUE_FAMILY;
+
+    return indices;
+}
+
+// ============================================================================
+// SWAPCHAIN
+// ============================================================================
+
+void candy_queury_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface,
+                                    candy_swapchain_support_details *details) {
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details->capabilities);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &details->format_count,
+                                         nullptr);
+    if (details->format_count > 32) {
+        details->format_count = 32;
+    }
+    if (details->format_count != 0) {
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &details->format_count,
+                                             details->formats);
+    }
+
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface,
+                                              &details->present_mode_count, nullptr);
+    if (details->present_mode_count > 16) {
+        details->present_mode_count = 16;
+    }
+    if (details->present_mode_count != 0) {
+        vkGetPhysicalDeviceSurfacePresentModesKHR(
+            device, surface, &details->present_mode_count, details->present_modes);
+    }
 }
 
 // ============================================================================
 // DEVICE SELECTION
 // ============================================================================
 
-void candy_find_physical_devices(VkInstance instance, candy_device_list *devices) {
+bool candy_check_device_extension_support(VkPhysicalDevice device) {
+    uint32_t extension_count = 0;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extension_count, nullptr);
+
+    if (extension_count == 0)
+        return false;
+
+    // Limit to reasonable number for stack allocation
+    if (extension_count > 256)
+        extension_count = 256;
+
+    VkExtensionProperties available_extensions[256];
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extension_count,
+                                         available_extensions);
+
+    // Check if all required extensions are available
+    for (size_t i = 0; i < DEVICE_EXTENSION_COUNT; ++i) {
+        bool found = false;
+        for (uint32_t j = 0; j < extension_count; ++j) {
+            if (strcmp(DEVICE_EXTENSIONS[i], available_extensions[j].extensionName) ==
+                0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void candy_find_physical_devices(VkInstance instance, VkSurfaceKHR surface,
+                                 candy_device_list *devices) {
     devices->count = 0;
 
     uint32_t device_count = 0;
@@ -216,17 +326,42 @@ void candy_find_physical_devices(VkInstance instance, candy_device_list *devices
         device_count = 16;
     vkEnumeratePhysicalDevices(instance, &device_count, devices->handles);
 
-    // Find graphics queue for each device
+    // Find queue families for each device
     for (uint32_t i = 0; i < device_count; ++i) {
-        devices->graphics_queue_families[i] =
-            candy_find_graphics_queue_family(devices->handles[i]);
+        candy_queue_family_indices indices =
+            candy_find_queue_families(devices->handles[i], surface);
+        devices->graphics_queue_families[i] = indices.graphics_family;
+        devices->present_queue_families[i] = indices.present_family;
     }
     devices->count = device_count;
 }
 
-uint32_t candy_pick_best_device(const candy_device_list *devices) {
+bool candy_is_device_suitable(VkPhysicalDevice device, uint32_t graphics_family,
+                              uint32_t present_family, VkSurfaceKHR surface) {
+    // Check if queue families are valid
+    bool has_queue_families = (graphics_family != INVALID_QUEUE_FAMILY &&
+                               present_family != INVALID_QUEUE_FAMILY);
+
+    // Check if device supports required extensions
+    bool extensions_supported = candy_check_device_extension_support(device);
+
+    bool is_swapchain_adequete = false;
+    if (extensions_supported) {
+        candy_swapchain_support_details swapchain_support = {};
+        candy_queury_swapchain_support(device, surface, &swapchain_support);
+
+        is_swapchain_adequete = (swapchain_support.format_count > 0 &&
+                                 swapchain_support.present_mode_count > 0);
+    }
+
+    return has_queue_families && extensions_supported && is_swapchain_adequete;
+}
+
+uint32_t candy_pick_best_device(const candy_device_list *devices, VkSurfaceKHR surface) {
     for (uint32_t i = 0; i < devices->count; ++i) {
-        if (devices->graphics_queue_families[i] != INVALID_QUEUE_FAMILY) {
+        if (candy_is_device_suitable(devices->handles[i],
+                                     devices->graphics_queue_families[i],
+                                     devices->present_queue_families[i], surface)) {
             return i;
         }
     }
@@ -284,30 +419,53 @@ void candy_init_vulkan_instance(candy_vk_instance *vk_instance,
     }
 }
 
+void candy_init_surface(candy_frame_data *frame_data,
+                        const candy_vk_instance *vk_instance) {
+    VkResult result = glfwCreateWindowSurface(vk_instance->instance, frame_data->window,
+                                              nullptr, &frame_data->surface);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create window surface");
+}
+
 void candy_init_physical_device(candy_frame_data *frame_data,
                                 const candy_vk_instance *vk_instance) {
     candy_device_list devices = {};
-    candy_find_physical_devices(vk_instance->instance, &devices);
+    candy_find_physical_devices(vk_instance->instance, frame_data->surface, &devices);
 
     CANDY_ASSERT(devices.count > 0, "No GPUs with Vulkan support found");
 
-    uint32_t best = candy_pick_best_device(&devices);
+    uint32_t best = candy_pick_best_device(&devices, frame_data->surface);
     CANDY_ASSERT(best != INVALID_QUEUE_FAMILY, "No suitable GPU found");
 
     frame_data->physical_device = devices.handles[best];
     frame_data->graphics_queue_family = devices.graphics_queue_families[best];
+    frame_data->present_queue_family = devices.present_queue_families[best];
 }
 
 void candy_init_logical_device(candy_frame_data *frame_data, const candy_config *config) {
+    // We need to create queue infos for unique queue families
+    uint32_t unique_queue_families[2];
+    uint32_t unique_count = 0;
+
+    unique_queue_families[unique_count++] = frame_data->graphics_queue_family;
+
+    // Only add present family if it's different from graphics family
+    if (frame_data->present_queue_family != frame_data->graphics_queue_family) {
+        unique_queue_families[unique_count++] = frame_data->present_queue_family;
+    }
+
     float queue_priority = 1.0f;
-    VkDeviceQueueCreateInfo queue_info = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .queueFamilyIndex = frame_data->graphics_queue_family,
-        .queueCount = 1,
-        .pQueuePriorities = &queue_priority,
-    };
+    VkDeviceQueueCreateInfo queue_infos[2];
+
+    for (uint32_t i = 0; i < unique_count; ++i) {
+        queue_infos[i] = {
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queueFamilyIndex = unique_queue_families[i],
+            .queueCount = 1,
+            .pQueuePriorities = &queue_priority,
+        };
+    }
 
     VkPhysicalDeviceFeatures device_features = {};
 
@@ -315,13 +473,13 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &queue_info,
+        .queueCreateInfoCount = unique_count,
+        .pQueueCreateInfos = queue_infos,
         .enabledLayerCount =
             config->enable_validation ? (uint32_t)VALIDATION_LAYER_COUNT : 0u,
         .ppEnabledLayerNames = config->enable_validation ? VALIDATION_LAYERS : nullptr,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = nullptr,
+        .enabledExtensionCount = DEVICE_EXTENSION_COUNT,
+        .ppEnabledExtensionNames = DEVICE_EXTENSIONS,
         .pEnabledFeatures = &device_features,
     };
 
@@ -329,8 +487,11 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
                                      &frame_data->logical_device);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create logical device");
 
+    // Get both queue handles
     vkGetDeviceQueue(frame_data->logical_device, frame_data->graphics_queue_family, 0,
                      &frame_data->graphics_queue);
+    vkGetDeviceQueue(frame_data->logical_device, frame_data->present_queue_family, 0,
+                     &frame_data->present_queue);
 }
 
 // ============================================================================
@@ -357,8 +518,10 @@ void candy_init(candy_renderer *candy) {
 
     CANDY_ASSERT(candy->frame_data.window != nullptr, "Failed to create window");
 
-    // Init Vulkan
+    // Init Vulkan - ORDER MATTERS!
     candy_init_vulkan_instance(&candy->vk_instance, &candy->config);
+    candy_init_surface(&candy->frame_data,
+                       &candy->vk_instance); // Create surface before picking device
     candy_init_physical_device(&candy->frame_data, &candy->vk_instance);
     candy_init_logical_device(&candy->frame_data, &candy->config);
 
@@ -372,7 +535,7 @@ void candy_cleanup(candy_renderer *candy) {
         candy_destroy_debug_messenger(candy->vk_instance.instance,
                                       candy->vk_instance.debug_messenger);
     }
-
+    vkDestroySurfaceKHR(candy->vk_instance.instance, candy->frame_data.surface, nullptr);
     vkDestroyInstance(candy->vk_instance.instance, nullptr);
     glfwDestroyWindow(candy->frame_data.window);
     glfwTerminate();

@@ -708,6 +708,10 @@ void candy_init(candy_renderer *candy) {
 void candy_cleanup(candy_renderer *candy) {
     vkDestroySwapchainKHR(candy->frame_data.logical_device, candy->config.swapchain,
                           nullptr);
+    for (uint32_t i = 0; i < candy->frame_data.swapchain_images_view_count; ++i) {
+        vkDestroyImageView(candy->frame_data.logical_device,
+                           candy->frame_data.swapchain_image_views[i], nullptr);
+    }
     vkDestroyDevice(candy->frame_data.logical_device, nullptr);
 
     if (candy->config.enable_validation) {
@@ -718,11 +722,6 @@ void candy_cleanup(candy_renderer *candy) {
     vkDestroyInstance(candy->vk_instance.instance, nullptr);
     glfwDestroyWindow(candy->frame_data.window);
     glfwTerminate();
-
-    for (uint32_t i = 0; i < candy->frame_data.swapchain_images_view_count; ++i) {
-        vkDestroyImageView(candy->frame_data.logical_device,
-                           candy->frame_data.swapchain_image_views[i], nullptr);
-    }
 
     std::cout << "[CANDY] Cleanup complete\n";
 }

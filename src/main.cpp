@@ -33,6 +33,7 @@ constexpr const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 constexpr size_t DEVICE_EXTENSION_COUNT = 1;
 
 constexpr uint32_t INVALID_QUEUE_FAMILY = UINT32_MAX;
+constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 8;
 
 #ifdef NDEBUG
 constexpr bool ENABLE_VALIDATION = false;
@@ -64,10 +65,12 @@ struct alignas(64) candy_frame_data {
     VkQueue present_queue;
     uint32_t graphics_queue_family;
     uint32_t present_queue_family;
-    VkImage swapchain_images[8];
+    VkImage swapchain_images[MAX_SWAPCHAIN_IMAGES];
     uint32_t swapchain_image_count;
     VkFormat swapchain_image_format;
     VkExtent2D swapchain_extent;
+    VkImageView swapchain_image_views[MAX_SWAPCHAIN_IMAGES];
+    uint32_t swapchain_images_view_count;
 };
 
 // Vulkan instance handles
@@ -257,6 +260,42 @@ candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
 // ============================================================================
 // SWAPCHAIN
 // ============================================================================
+
+void candy_create_image_views(candy_frame_data *frame_data) {
+    if (frame_data->swapchain_images_view_count > MAX_SWAPCHAIN_IMAGES) {
+        frame_data->swapchain_images_view_count = MAX_SWAPCHAIN_IMAGES;
+    }
+    for (size_t i = 0; i < frame_data->swapchain_images_view_count; ++i) {
+        VkImageViewCreateInfo create_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr, // pNext must be before flags
+            .flags = 0,
+            .image = frame_data->swapchain_images[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = frame_data->swapchain_image_format,
+            .components =
+                {
+                    // Initialize the VkComponentMapping struct directly
+                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+            .subresourceRange =
+                {
+                    // Initialize the VkImageSubresourceRange struct directly
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+        };
+        VkResult result = vkCreateImageView(frame_data->logical_device, &create_info,
+                                            nullptr, frame_data->swapchain_image_views);
+        CANDY_ASSERT(result, "Failed to create image views");
+    }
+}
 
 void candy_queury_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface,
                                     candy_swapchain_support_details *details) {
@@ -679,6 +718,11 @@ void candy_cleanup(candy_renderer *candy) {
     vkDestroyInstance(candy->vk_instance.instance, nullptr);
     glfwDestroyWindow(candy->frame_data.window);
     glfwTerminate();
+
+    for (uint32_t i = 0; i < candy->frame_data.swapchain_images_view_count; ++i) {
+        vkDestroyImageView(candy->frame_data.logical_device,
+                           candy->frame_data.swapchain_image_views[i], nullptr);
+    }
 
     std::cout << "[CANDY] Cleanup complete\n";
 }

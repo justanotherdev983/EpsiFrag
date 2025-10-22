@@ -64,6 +64,10 @@ struct alignas(64) candy_frame_data {
     VkQueue present_queue;
     uint32_t graphics_queue_family;
     uint32_t present_queue_family;
+    VkImage swapchain_images[8];
+    uint32_t swapchain_image_count;
+    VkFormat swapchain_image_format;
+    VkExtent2D swapchain_extent;
 };
 
 // Vulkan instance handles
@@ -549,7 +553,7 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
 
 void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
                           VkSurfaceKHR surface, const GLFWwindow *window,
-                          candy_config *config) {
+                          candy_config *config, candy_frame_data *frame_data) {
     candy_swapchain_support_details swapchain_details = {};
     candy_queury_swapchain_support(physical_device, surface, &swapchain_details);
 
@@ -565,12 +569,14 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
     candy_choose_swap_extent(&extent, swapchain_details.capabilities,
                              (GLFWwindow *)window);
 
-    uint32_t image_count = swapchain_details.capabilities.minImageCount +
-                           1; // +1 bcuz if its minImageCount we have to wait on driver
+    frame_data->swapchain_image_count =
+        swapchain_details.capabilities.minImageCount +
+        1; // +1 bcuz if its minImageCount we have to wait on driver
 
     if (swapchain_details.capabilities.maxImageCount > 0 &&
-        image_count > swapchain_details.capabilities.maxImageCount) {
-        image_count = swapchain_details.capabilities.maxImageCount;
+        frame_data->swapchain_image_count >
+            swapchain_details.capabilities.maxImageCount) {
+        frame_data->swapchain_image_count = swapchain_details.capabilities.maxImageCount;
     }
 
     VkSwapchainCreateInfoKHR create_info = {
@@ -578,7 +584,7 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
         .pNext = nullptr,
         .flags = 0,
         .surface = surface,
-        .minImageCount = image_count,
+        .minImageCount = frame_data->swapchain_image_count,
         .imageFormat = surface_fmt.format,
         .imageColorSpace = surface_fmt.colorSpace,
         .imageExtent = extent,
@@ -610,6 +616,15 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
     VkResult result =
         vkCreateSwapchainKHR(device, &create_info, nullptr, &config->swapchain);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create swapchain");
+    vkGetSwapchainImagesKHR(device, config->swapchain, &frame_data->swapchain_image_count,
+                            nullptr);
+    if (frame_data->swapchain_image_count > 8) {
+        frame_data->swapchain_image_count = 8;
+    }
+    vkGetSwapchainImagesKHR(device, config->swapchain, &frame_data->swapchain_image_count,
+                            frame_data->swapchain_images);
+    frame_data->swapchain_image_format = surface_fmt.format;
+    frame_data->swapchain_extent = extent;
 }
 
 // ============================================================================
@@ -645,7 +660,8 @@ void candy_init(candy_renderer *candy) {
     candy_init_logical_device(&candy->frame_data, &candy->config);
     candy_init_swapchain(candy->frame_data.logical_device,
                          candy->frame_data.physical_device, candy->frame_data.surface,
-                         (const GLFWwindow *)candy->frame_data.window, &candy->config);
+                         (const GLFWwindow *)candy->frame_data.window, &candy->config,
+                         &candy->frame_data);
 
     std::cout << "[CANDY] Init complete\n";
 }

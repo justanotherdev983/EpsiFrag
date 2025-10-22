@@ -283,16 +283,21 @@ static std::vector<char> candy_read_shader_file(const std::string &filename) {
 
 VkShaderModule candy_create_shader_module(const std::vector<char> &shader_code,
                                           VkDevice device) {
+    if (shader_code.size() % sizeof(uint32_t) != 0) {
+        // You might want to log a more specific error here
+        CANDY_ASSERT(false, "Shader code size is not a multiple of 4 bytes!");
+        return VK_NULL_HANDLE; // Or handle error appropriately
+    }
     VkShaderModuleCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .codeSize = shader_code.size(),
-        .pCode = (const uint32_t *)shader_code.data(),
+        .pCode = reinterpret_cast<const uint32_t *>(shader_code.data()),
     };
     VkShaderModule shader_module;
     VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader_module);
-    CANDY_ASSERT(result, "Failed to create shader module");
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create shader module");
 
     return shader_module;
 }
@@ -310,12 +315,37 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
 
     CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
                  "Exceeded MAX_SHADER_MODULES");
+    uint32_t vert_module_idx = candy->shader_module_count;
     candy->shader_modules[candy->shader_module_count++] = vert_shader_module;
 
     CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
                  "Exceeded MAX_SHADER_MODULES");
+    uint32_t frag_module_idx = candy->shader_module_count;
     candy->shader_modules[candy->shader_module_count++] = frag_shader_module;
 
+    VkPipelineShaderStageCreateInfo create_vert_shader_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT,
+        .module = candy->shader_modules[vert_module_idx],
+        .pName = "main",
+        .pSpecializationInfo = nullptr,
+    };
+
+    VkPipelineShaderStageCreateInfo create_frag_shader_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = candy->shader_modules[frag_module_idx],
+        .pName = "main",
+        .pSpecializationInfo = nullptr,
+    };
+
+    VkPipelineShaderStageCreateInfo shader_stages[] = {create_vert_shader_info,
+                                                       create_frag_shader_info};
+    (void)shader_stages;
     return;
 }
 

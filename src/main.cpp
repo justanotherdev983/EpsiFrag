@@ -51,6 +51,7 @@ struct candy_config {
     bool enable_validation;
     const char *app_name;
     const char *window_title;
+    VkSwapchainKHR swapchain;
 };
 
 // Hot data - accessed every frame (cache-line aligned)
@@ -285,6 +286,7 @@ void candy_choose_swap_surface_format(VkSurfaceFormatKHR *surface_fmt,
         if (available_formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
             available_formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             *surface_fmt = available_formats[i];
+            return;
         }
     }
 
@@ -298,7 +300,8 @@ void candy_choose_swap_present_mode(VkPresentModeKHR *present_mode,
     for (uint32_t i = 0; i < present_mode_count; ++i) {
         if (available_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
             *present_mode =
-                VK_PRESENT_MODE_FIFO_KHR; // Probably best, the triple buffer solution
+                VK_PRESENT_MODE_MAILBOX_KHR; // Probably best, the triple buffer solution
+            return;
         }
     }
 
@@ -544,13 +547,14 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
                      &frame_data->present_queue);
 }
 
-void candy_init_swapchain(VkPhysicalDevice device, VkSurfaceKHR surface,
-                          const GLFWwindow *window) {
+void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
+                          VkSurfaceKHR surface, const GLFWwindow *window,
+                          candy_config *config) {
     candy_swapchain_support_details swapchain_details = {};
-    candy_queury_swapchain_support(device, surface, &swapchain_details);
+    candy_queury_swapchain_support(physical_device, surface, &swapchain_details);
 
     VkSurfaceFormatKHR surface_fmt = {};
-    candy_choose_swap_surface_format(swapchain_details.formats, &surface_fmt,
+    candy_choose_swap_surface_format(&surface_fmt, swapchain_details.formats,
                                      swapchain_details.format_count);
 
     VkPresentModeKHR present_mode = {};
@@ -580,10 +584,32 @@ void candy_init_swapchain(VkPhysicalDevice device, VkSurfaceKHR surface,
         .imageExtent = extent,
         .imageArrayLayers = 1,                             // We dont need other
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // Bcuz we dont do things like
-                                                           // post-processing
-    };
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .preTransform = swapchain_details.capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = present_mode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE, // For now assume only create 1 swapchain
 
-    // TODO: Fill in the rest of the struct...
+    };
+    candy_queue_family_indices indices =
+        candy_find_queue_families(physical_device, surface);
+    uint32_t queue_family_indicies[] = {indices.graphics_family, indices.present_family};
+
+    if (indices.graphics_family != indices.present_family) {
+        create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        create_info.queueFamilyIndexCount = 2;
+        create_info.pQueueFamilyIndices = queue_family_indicies;
+    } else {
+        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        create_info.queueFamilyIndexCount = 0;
+        create_info.pQueueFamilyIndices = nullptr;
+    }
+    VkResult result =
+        vkCreateSwapchainKHR(device, &create_info, nullptr, &config->swapchain);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create swapchain");
 }
 
 // ============================================================================
@@ -597,6 +623,7 @@ void candy_init(candy_renderer *candy) {
         .enable_validation = ENABLE_VALIDATION,
         .app_name = "Candy Renderer",
         .window_title = "Candy Window",
+        .swapchain = VK_NULL_HANDLE,
     };
 
     // Init GLFW
@@ -616,13 +643,16 @@ void candy_init(candy_renderer *candy) {
                        &candy->vk_instance); // Create surface before picking device
     candy_init_physical_device(&candy->frame_data, &candy->vk_instance);
     candy_init_logical_device(&candy->frame_data, &candy->config);
-    candy_init_swapchain(candy->frame_data.physical_device, candy->frame_data.surface,
-                         (const GLFWwindow *)&candy->frame_data.window);
+    candy_init_swapchain(candy->frame_data.logical_device,
+                         candy->frame_data.physical_device, candy->frame_data.surface,
+                         (const GLFWwindow *)candy->frame_data.window, &candy->config);
 
     std::cout << "[CANDY] Init complete\n";
 }
 
 void candy_cleanup(candy_renderer *candy) {
+    vkDestroySwapchainKHR(candy->frame_data.logical_device, candy->config.swapchain,
+                          nullptr);
     vkDestroyDevice(candy->frame_data.logical_device, nullptr);
 
     if (candy->config.enable_validation) {

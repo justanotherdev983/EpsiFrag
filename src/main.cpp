@@ -90,6 +90,8 @@ struct candy_renderer {
     candy_config config;
     VkShaderModule shader_modules[MAX_SHADER_MODULES];
     uint32_t shader_module_count;
+    VkRenderPass render_pass;
+    VkPipelineLayout pipeline_layout;
 };
 
 // Helper for device selection
@@ -266,6 +268,57 @@ candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
 // GRAPHICS PIPELINE
 // ============================================================================
 
+void candy_create_render_pass(candy_renderer *candy) {
+    VkAttachmentDescription color_attachment = {
+        .flags = 0,
+        .format = candy->frame_data.swapchain_image_format,
+        .samples = VK_SAMPLE_COUNT_1_BIT,      // no multi sample yet
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, // no reuse of values
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, // change later for textures
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+
+    VkAttachmentReference color_attachment_ref = {
+        .attachment =
+            0, // we only have 1 for now, later post processing but for now index 0
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    VkSubpassDescription subpass = {
+        .flags = 0,
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .inputAttachmentCount = 0,
+        .pInputAttachments = nullptr,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment_ref,
+        .pResolveAttachments = nullptr,
+        .pDepthStencilAttachment = nullptr,
+        .preserveAttachmentCount = 0,
+        .pPreserveAttachments = nullptr,
+    };
+
+    VkRenderPassCreateInfo render_pass_info {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .attachmentCount = 1,
+        .pAttachments = &color_attachment,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 0,
+        .pDependencies = nullptr,
+    };
+
+    VkResult result = vkCreateRenderPass(candy->frame_data.logical_device,
+                                         &render_pass_info, nullptr, &candy->render_pass);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create render pass");
+
+    return;
+}
+
 static std::vector<char> candy_read_shader_file(const std::string &filename) {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
@@ -346,6 +399,140 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
     VkPipelineShaderStageCreateInfo shader_stages[] = {create_vert_shader_info,
                                                        create_frag_shader_info};
     (void)shader_stages;
+
+    std::vector<VkDynamicState> dynamic_states = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamic_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .dynamicStateCount = static_cast<uint32_t>(dynamic_states.size()),
+        .pDynamicStates = dynamic_states.data(),
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertex_input_info = {
+        // We can in future use this for vars inside vertex shader
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .vertexBindingDescriptionCount = 0,
+        .pVertexBindingDescriptions = nullptr,
+        .vertexAttributeDescriptionCount = 0,
+        .pVertexAttributeDescriptions = nullptr,
+    };
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+        // We can use this to draw other things than triangles; set in topology
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable =
+            VK_FALSE, //  possible to break up lines and triangles in the _STRIP topology
+                      //  modes using index of 0xFFFF or 0xFFFFFFFF
+    };
+
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)candy->frame_data.swapchain_extent.width,
+        .height = (float)candy->frame_data.swapchain_extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = candy->frame_data.swapchain_extent,
+    };
+
+    VkPipelineViewportStateCreateInfo viewport_state = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .viewportCount = 1,
+        .pViewports = nullptr, // this could break, bcuz we do dynamic
+        .scissorCount = 1,
+        .pScissors = nullptr, // this could also break due to dynamic
+    };
+    VkPipelineRasterizationStateCreateInfo rasterizer = {
+        // we want to fill triangle, if not, like skeleton, change here
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL, // basically draw mode
+        .cullMode = VK_CULL_MODE_BACK_BIT,
+        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE, // we wont use this depth constant
+        .depthBiasConstantFactor = 0.0f,
+        .depthBiasClamp = 0.0f,
+        .depthBiasSlopeFactor = 0.0f,
+        .lineWidth = 1.0f,
+    };
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {
+        // i kinda hate anti-aliasing
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = VK_FALSE,
+        .minSampleShading = 1.0f,
+        .pSampleMask = nullptr,
+        .alphaToCoverageEnable = VK_FALSE,
+        .alphaToOneEnable = VK_FALSE,
+    };
+
+    // we curretly only have 1 framebuffer
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        .blendEnable = VK_TRUE, // can also be false for crisp
+        .srcColorBlendFactor =
+            VK_BLEND_FACTOR_SRC_ALPHA, // this will be VK_BLEND_FACTOR_ONE if false
+        .dstColorBlendFactor =
+            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, // this will be VK_BLEND_FACTOR_ZERO then
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+
+    VkPipelineColorBlendStateCreateInfo color_blending = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .logicOpEnable = VK_TRUE,   // this should also be false if you want no blend
+        .logicOp = VK_LOGIC_OP_AND, // WARNING: Should prob be VK_LOGIC_OP_COPY but idk
+                                    // for this blendmode
+        .attachmentCount = 1,
+        .pAttachments = &color_blend_attachment,
+        .blendConstants[0] = 0.0f,
+        .blendConstants[1] = 0.0f,
+        .blendConstants[2] = 0.0f,
+        .blendConstants[3] = 0.0f,
+    };
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .setLayoutCount = 0,
+        .pSetLayouts = nullptr,
+        .pushConstantRangeCount = 0,
+        .pPushConstantRanges = nullptr,
+    };
+
+    VkResult result =
+        vkCreatePipelineLayout(candy->frame_data.logical_device, &pipeline_layout_info,
+                               nullptr, &candy->pipeline_layout);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create pipeline layout");
+
     return;
 }
 
@@ -794,6 +981,7 @@ void candy_init(candy_renderer *candy) {
                          (const GLFWwindow *)candy->frame_data.window, &candy->config,
                          &candy->frame_data);
     candy_create_image_views(&candy->frame_data);
+    candy_create_render_pass(candy);
     candy_create_graphics_pipeline(candy);
 
     std::cout << "[CANDY] Init complete\n";
@@ -811,7 +999,9 @@ void candy_cleanup(candy_renderer *candy) {
         vkDestroyShaderModule(candy->frame_data.logical_device, candy->shader_modules[i],
                               nullptr);
     }
-
+    vkDestroyPipelineLayout(candy->frame_data.logical_device, candy->pipeline_layout,
+                            nullptr);
+    vkDestroyRenderPass(candy->frame_data.logical_device, candy->render_pass, nullptr);
     vkDestroyDevice(candy->frame_data.logical_device, nullptr);
 
     if (candy->config.enable_validation) {
@@ -820,6 +1010,7 @@ void candy_cleanup(candy_renderer *candy) {
     }
     vkDestroySurfaceKHR(candy->vk_instance.instance, candy->frame_data.surface, nullptr);
     vkDestroyInstance(candy->vk_instance.instance, nullptr);
+
     glfwDestroyWindow(candy->frame_data.window);
     glfwTerminate();
 

@@ -1,18 +1,20 @@
 #version 450
 
-uniform mat4 ModelViewProjectionMatrix;
+layout(location = 0) out vec3 fragColor;
 
-layout(location = 0) in vec4 Vertex;
-layout(location = 1) in vec4 Color;
+vec2 positions[3] = vec2[](
+    vec2(0.0, -0.5),
+    vec2(0.5, 0.5),
+    vec2(-0.5, 0.5)
+);
 
-out VertexData{
-    vec4 mColor;
-    vec4 mVertex;
-} VertexOut;
+vec3 colors[3] = vec3[](
+    vec3(1.0, 0.0, 0.0),
+    vec3(0.0, 1.0, 0.0),
+    vec3(0.0, 0.0, 1.0)
+);
 
-void main(void)
-{
-    VertexOut.mColor = Color;
-    VertexOut.mVertex = Vertex;
-    gl_Position = ModelViewProjectionMatrix * Vertex;
+void main() {
+    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+    fragColor = colors[gl_VertexIndex];
 }

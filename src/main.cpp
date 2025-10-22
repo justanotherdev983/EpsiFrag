@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <numeric>
 #include <string.h>
+#include <vector> // For reading our shader files
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -34,6 +37,7 @@ constexpr size_t DEVICE_EXTENSION_COUNT = 1;
 
 constexpr uint32_t INVALID_QUEUE_FAMILY = UINT32_MAX;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 8;
+constexpr uint32_t MAX_SHADER_MODULES = 16;
 
 #ifdef NDEBUG
 constexpr bool ENABLE_VALIDATION = false;
@@ -84,6 +88,8 @@ struct candy_renderer {
     candy_frame_data frame_data;
     candy_vk_instance vk_instance;
     candy_config config;
+    VkShaderModule shader_modules[MAX_SHADER_MODULES];
+    uint32_t shader_module_count;
 };
 
 // Helper for device selection
@@ -255,6 +261,62 @@ candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
     }
 
     return indices;
+}
+// ============================================================================
+// GRAPHICS PIPELINE
+// ============================================================================
+
+static std::vector<char> candy_read_shader_file(const std::string &filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("failed to open file!");
+    }
+
+    size_t file_size = (size_t)file.tellg();
+    std::vector<char> buffer(file_size);
+    file.seekg(0);
+    file.read(buffer.data(), file_size);
+    file.close();
+    return buffer;
+}
+
+VkShaderModule candy_create_shader_module(const std::vector<char> &shader_code,
+                                          VkDevice device) {
+    VkShaderModuleCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .codeSize = shader_code.size(),
+        .pCode = (const uint32_t *)shader_code.data(),
+    };
+    VkShaderModule shader_module;
+    VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader_module);
+    CANDY_ASSERT(result, "Failed to create shader module");
+
+    return shader_module;
+}
+
+void candy_create_graphics_pipeline(candy_renderer *candy) {
+    std::vector<char> vert_shader_code =
+        candy_read_shader_file("../src/shaders/simple_shader.vert.spv");
+    std::vector<char> frag_shader_code =
+        candy_read_shader_file("../src/shaders/simple_shader.frag.spv");
+
+    VkShaderModule vert_shader_module =
+        candy_create_shader_module(vert_shader_code, candy->frame_data.logical_device);
+    VkShaderModule frag_shader_module =
+        candy_create_shader_module(frag_shader_code, candy->frame_data.logical_device);
+
+    CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
+                 "Exceeded MAX_SHADER_MODULES");
+    candy->shader_modules[candy->shader_module_count++] = vert_shader_module;
+
+    CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
+                 "Exceeded MAX_SHADER_MODULES");
+    candy->shader_modules[candy->shader_module_count++] = frag_shader_module;
+
+    return;
 }
 
 // ============================================================================
@@ -691,7 +753,7 @@ void candy_init(candy_renderer *candy) {
 
     CANDY_ASSERT(candy->frame_data.window != nullptr, "Failed to create window");
 
-    // Init Vulkan - ORDER MATTERS!
+    // Init Vulkan
     candy_init_vulkan_instance(&candy->vk_instance, &candy->config);
     candy_init_surface(&candy->frame_data,
                        &candy->vk_instance); // Create surface before picking device
@@ -701,6 +763,8 @@ void candy_init(candy_renderer *candy) {
                          candy->frame_data.physical_device, candy->frame_data.surface,
                          (const GLFWwindow *)candy->frame_data.window, &candy->config,
                          &candy->frame_data);
+    candy_create_image_views(&candy->frame_data);
+    candy_create_graphics_pipeline(candy);
 
     std::cout << "[CANDY] Init complete\n";
 }
@@ -712,6 +776,12 @@ void candy_cleanup(candy_renderer *candy) {
         vkDestroyImageView(candy->frame_data.logical_device,
                            candy->frame_data.swapchain_image_views[i], nullptr);
     }
+
+    for (uint32_t i = 0; i < candy->shader_module_count; ++i) {
+        vkDestroyShaderModule(candy->frame_data.logical_device, candy->shader_modules[i],
+                              nullptr);
+    }
+
     vkDestroyDevice(candy->frame_data.logical_device, nullptr);
 
     if (candy->config.enable_validation) {

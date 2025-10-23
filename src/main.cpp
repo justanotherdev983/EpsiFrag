@@ -56,50 +56,75 @@ struct candy_config {
     bool enable_validation;
     const char *app_name;
     const char *window_title;
-    VkSwapchainKHR swapchain;
 };
 
 // Hot data - accessed every frame (cache-line aligned)
 struct alignas(64) candy_frame_data {
+    // For future command pools and in flight stuff
+};
+
+// All core long-lived vulkan handles
+struct candy_core {
+    VkInstance instance;
+    VkDebugUtilsMessengerEXT debug_messenger;
+
     GLFWwindow *window;
     VkSurfaceKHR surface;
     VkPhysicalDevice physical_device;
     VkDevice logical_device;
+
     VkQueue graphics_queue;
     VkQueue present_queue;
     uint32_t graphics_queue_family;
     uint32_t present_queue_family;
-    VkImage swapchain_images[MAX_SWAPCHAIN_IMAGES];
-    uint32_t swapchain_image_count;
-    VkFormat swapchain_image_format;
-    VkExtent2D swapchain_extent;
-    VkImageView swapchain_image_views[MAX_SWAPCHAIN_IMAGES];
-    uint32_t swapchain_images_view_count;
 };
 
-// Vulkan instance handles
-struct candy_vk_instance {
-    VkInstance instance;
-    VkDebugUtilsMessengerEXT debug_messenger;
+// This is "warm" data. This is all recreated together when the window is resized.
+struct candy_swapchain {
+    VkSwapchainKHR handle;
+    VkFormat image_format;
+    VkExtent2D extent;
+    uint32_t image_count;
+    uint32_t image_view_count;
+
+    // We get the images from the swapchain, but we create the views and framebuffers.
+    VkImageView image_views[MAX_SWAPCHAIN_IMAGES];
+    VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
+    VkImage images[MAX_SWAPCHAIN_IMAGES];
 };
 
-// Main candy renderer
-struct candy_renderer {
-    candy_frame_data frame_data;
-    candy_vk_instance vk_instance;
-    candy_config config;
-    VkShaderModule shader_modules[MAX_SHADER_MODULES];
-    uint32_t shader_module_count;
+struct candy_pipeline {
     VkRenderPass render_pass;
     VkPipelineLayout pipeline_layout;
     VkPipeline graphics_pipeline;
+
+    // Shader modules are only needed for pipeline creation.
+    // They are effectively "cold" data for a specific pipeline.
+    VkShaderModule shader_modules[MAX_SHADER_MODULES];
+    uint32_t shader_module_count;
+};
+
+// Main candy context
+struct candy_context {
+    // --- Cold Data ---
+    candy_config config;
+
+    // --- Core Systems ---
+    candy_core core;
+
+    // --- Rendering Pipeline (recreated if swapchain changes format) ---
+    candy_swapchain swapchain;
+    candy_pipeline pipeline;
+
+    // --- Hot Data ---
+    candy_frame_data frame_data;
 };
 
 // Helper for device selection
 struct candy_device_list {
     VkPhysicalDevice handles[16];
     uint32_t graphics_queue_families[16];
-    uint32_t present_queue_families[16]; // ADD: store present queue families too
+    uint32_t present_queue_families[16];
     uint32_t count;
 };
 
@@ -269,10 +294,10 @@ candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
 // GRAPHICS PIPELINE
 // ============================================================================
 
-void candy_create_render_pass(candy_renderer *candy) {
+void candy_create_render_pass(candy_context *ctx) {
     VkAttachmentDescription color_attachment = {
         .flags = 0,
-        .format = candy->frame_data.swapchain_image_format,
+        .format = ctx->swapchain.image_format,
         .samples = VK_SAMPLE_COUNT_1_BIT,      // no multi sample yet
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, // no reuse of values
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -313,8 +338,8 @@ void candy_create_render_pass(candy_renderer *candy) {
         .pDependencies = nullptr,
     };
 
-    VkResult result = vkCreateRenderPass(candy->frame_data.logical_device,
-                                         &render_pass_info, nullptr, &candy->render_pass);
+    VkResult result = vkCreateRenderPass(ctx->core.logical_device, &render_pass_info,
+                                         nullptr, &ctx->pipeline.render_pass);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create render pass");
 
     return;
@@ -356,33 +381,35 @@ VkShaderModule candy_create_shader_module(const std::vector<char> &shader_code,
     return shader_module;
 }
 
-void candy_create_graphics_pipeline(candy_renderer *candy) {
+void candy_create_graphics_pipeline(candy_context *candy) {
     std::vector<char> vert_shader_code =
         candy_read_shader_file("../src/shaders/simple_shader.vert.spv");
     std::vector<char> frag_shader_code =
         candy_read_shader_file("../src/shaders/simple_shader.frag.spv");
 
     VkShaderModule vert_shader_module =
-        candy_create_shader_module(vert_shader_code, candy->frame_data.logical_device);
+        candy_create_shader_module(vert_shader_code, candy->core.logical_device);
     VkShaderModule frag_shader_module =
-        candy_create_shader_module(frag_shader_code, candy->frame_data.logical_device);
+        candy_create_shader_module(frag_shader_code, candy->core.logical_device);
 
-    CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
+    CANDY_ASSERT(candy->pipeline.shader_module_count < MAX_SHADER_MODULES,
                  "Exceeded MAX_SHADER_MODULES");
-    uint32_t vert_module_idx = candy->shader_module_count;
-    candy->shader_modules[candy->shader_module_count++] = vert_shader_module;
+    uint32_t vert_module_idx = candy->pipeline.shader_module_count;
+    candy->pipeline.shader_modules[candy->pipeline.shader_module_count++] =
+        vert_shader_module;
 
-    CANDY_ASSERT(candy->shader_module_count < MAX_SHADER_MODULES,
+    CANDY_ASSERT(candy->pipeline.shader_module_count < MAX_SHADER_MODULES,
                  "Exceeded MAX_SHADER_MODULES");
-    uint32_t frag_module_idx = candy->shader_module_count;
-    candy->shader_modules[candy->shader_module_count++] = frag_shader_module;
+    uint32_t frag_module_idx = candy->pipeline.shader_module_count;
+    candy->pipeline.shader_modules[candy->pipeline.shader_module_count++] =
+        frag_shader_module;
 
     VkPipelineShaderStageCreateInfo create_vert_shader_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = candy->shader_modules[vert_module_idx],
+        .module = candy->pipeline.shader_modules[vert_module_idx],
         .pName = "main",
         .pSpecializationInfo = nullptr,
     };
@@ -392,7 +419,7 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .pNext = nullptr,
         .flags = 0,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = candy->shader_modules[frag_module_idx],
+        .module = candy->pipeline.shader_modules[frag_module_idx],
         .pName = "main",
         .pSpecializationInfo = nullptr,
     };
@@ -436,19 +463,22 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
                       //  modes using index of 0xFFFF or 0xFFFFFFFF
     };
 
+    // We use dynamic so these are currently not needed
+    /*
     VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
-        .width = (float)candy->frame_data.swapchain_extent.width,
-        .height = (float)candy->frame_data.swapchain_extent.height,
+        .width = (float)candy->swapchain.extent.width,
+        .height = (float)candy->swapchain.extent.height,
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
 
     VkRect2D scissor = {
         .offset = {0, 0},
-        .extent = candy->frame_data.swapchain_extent,
+        .extent = candy->swapchain.extent,
     };
+    */
 
     VkPipelineViewportStateCreateInfo viewport_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -491,8 +521,6 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
 
     // we curretly only have 1 framebuffer
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = VK_TRUE, // can also be false for crisp
         .srcColorBlendFactor =
             VK_BLEND_FACTOR_SRC_ALPHA, // this will be VK_BLEND_FACTOR_ONE if false
@@ -502,6 +530,9 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
         .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+
     };
 
     VkPipelineColorBlendStateCreateInfo color_blending = {
@@ -512,10 +543,8 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
-        .blendConstants[0] = 0.0f,
-        .blendConstants[1] = 0.0f,
-        .blendConstants[2] = 0.0f,
-        .blendConstants[3] = 0.0f,
+        .blendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
+
     };
 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
@@ -529,8 +558,8 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
     };
 
     VkResult result =
-        vkCreatePipelineLayout(candy->frame_data.logical_device, &pipeline_layout_info,
-                               nullptr, &candy->pipeline_layout);
+        vkCreatePipelineLayout(candy->core.logical_device, &pipeline_layout_info, nullptr,
+                               &candy->pipeline.pipeline_layout);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create pipeline layout");
 
     VkGraphicsPipelineCreateInfo pipeline_info = {
@@ -548,16 +577,16 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .pDepthStencilState = nullptr,
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_state,
-        .layout = candy->pipeline_layout,
-        .renderPass = candy->render_pass,
+        .layout = candy->pipeline.pipeline_layout,
+        .renderPass = candy->pipeline.render_pass,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1,
     };
 
-    VkResult result_pipelines =
-        vkCreateGraphicsPipelines(candy->frame_data.logical_device, VK_NULL_HANDLE, 1,
-                                  &pipeline_info, nullptr, &candy->graphics_pipeline);
+    VkResult result_pipelines = vkCreateGraphicsPipelines(
+        candy->core.logical_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr,
+        &candy->pipeline.graphics_pipeline);
     CANDY_ASSERT(result_pipelines == VK_SUCCESS, "Failed to create pipeline layout");
 
     return;
@@ -567,18 +596,18 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
 // SWAPCHAIN
 // ============================================================================
 
-void candy_create_image_views(candy_frame_data *frame_data) {
-    if (frame_data->swapchain_images_view_count > MAX_SWAPCHAIN_IMAGES) {
-        frame_data->swapchain_images_view_count = MAX_SWAPCHAIN_IMAGES;
+void candy_create_image_views(candy_context *ctx) {
+    if (ctx->swapchain.image_count > MAX_SWAPCHAIN_IMAGES) {
+        ctx->swapchain.image_count = MAX_SWAPCHAIN_IMAGES;
     }
-    for (size_t i = 0; i < frame_data->swapchain_images_view_count; ++i) {
+    for (size_t i = 0; i < ctx->swapchain.image_count; ++i) {
         VkImageViewCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .pNext = nullptr, // pNext must be before flags
+            .pNext = nullptr,
             .flags = 0,
-            .image = frame_data->swapchain_images[i],
+            .image = ctx->swapchain.images[i],
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = frame_data->swapchain_image_format,
+            .format = ctx->swapchain.image_format,
             .components =
                 {
                     // Initialize the VkComponentMapping struct directly
@@ -597,10 +626,11 @@ void candy_create_image_views(candy_frame_data *frame_data) {
                     .layerCount = 1,
                 },
         };
-        VkResult result = vkCreateImageView(frame_data->logical_device, &create_info,
-                                            nullptr, frame_data->swapchain_image_views);
-        CANDY_ASSERT(result, "Failed to create image views");
+        VkResult result = vkCreateImageView(ctx->core.logical_device, &create_info,
+                                            nullptr, &ctx->swapchain.image_views[i]);
+        CANDY_ASSERT(result == VK_SUCCESS, "Failed to create image views");
     }
+    ctx->swapchain.image_view_count = ctx->swapchain.image_count;
 }
 
 void candy_queury_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface,
@@ -774,8 +804,7 @@ uint32_t candy_pick_best_device(const candy_device_list *devices, VkSurfaceKHR s
 // INITIALIZATION
 // ============================================================================
 
-void candy_init_vulkan_instance(candy_vk_instance *vk_instance,
-                                const candy_config *config) {
+void candy_init_vulkan_instance(candy_core *vk_instance, const candy_config *config) {
     if (config->enable_validation) {
         CANDY_ASSERT(candy_check_validation_layers(), "Validation layers not available");
     }
@@ -821,38 +850,36 @@ void candy_init_vulkan_instance(candy_vk_instance *vk_instance,
     }
 }
 
-void candy_init_surface(candy_frame_data *frame_data,
-                        const candy_vk_instance *vk_instance) {
-    VkResult result = glfwCreateWindowSurface(vk_instance->instance, frame_data->window,
-                                              nullptr, &frame_data->surface);
+void candy_init_surface(candy_core *core) {
+    VkResult result =
+        glfwCreateWindowSurface(core->instance, core->window, nullptr, &core->surface);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create window surface");
 }
 
-void candy_init_physical_device(candy_frame_data *frame_data,
-                                const candy_vk_instance *vk_instance) {
+void candy_init_physical_device(candy_core *core) {
     candy_device_list devices = {};
-    candy_find_physical_devices(vk_instance->instance, frame_data->surface, &devices);
+    candy_find_physical_devices(core->instance, core->surface, &devices);
 
     CANDY_ASSERT(devices.count > 0, "No GPUs with Vulkan support found");
 
-    uint32_t best = candy_pick_best_device(&devices, frame_data->surface);
+    uint32_t best = candy_pick_best_device(&devices, core->surface);
     CANDY_ASSERT(best != INVALID_QUEUE_FAMILY, "No suitable GPU found");
 
-    frame_data->physical_device = devices.handles[best];
-    frame_data->graphics_queue_family = devices.graphics_queue_families[best];
-    frame_data->present_queue_family = devices.present_queue_families[best];
+    core->physical_device = devices.handles[best];
+    core->graphics_queue_family = devices.graphics_queue_families[best];
+    core->present_queue_family = devices.present_queue_families[best];
 }
 
-void candy_init_logical_device(candy_frame_data *frame_data, const candy_config *config) {
+void candy_init_logical_device(candy_context *ctx) {
     // We need to create queue infos for unique queue families
     uint32_t unique_queue_families[2];
     uint32_t unique_count = 0;
 
-    unique_queue_families[unique_count++] = frame_data->graphics_queue_family;
+    unique_queue_families[unique_count++] = ctx->core.graphics_queue_family;
 
     // Only add present family if it's different from graphics family
-    if (frame_data->present_queue_family != frame_data->graphics_queue_family) {
-        unique_queue_families[unique_count++] = frame_data->present_queue_family;
+    if (ctx->core.present_queue_family != ctx->core.graphics_queue_family) {
+        unique_queue_families[unique_count++] = ctx->core.present_queue_family;
     }
 
     float queue_priority = 1.0f;
@@ -878,29 +905,29 @@ void candy_init_logical_device(candy_frame_data *frame_data, const candy_config 
         .queueCreateInfoCount = unique_count,
         .pQueueCreateInfos = queue_infos,
         .enabledLayerCount =
-            config->enable_validation ? (uint32_t)VALIDATION_LAYER_COUNT : 0u,
-        .ppEnabledLayerNames = config->enable_validation ? VALIDATION_LAYERS : nullptr,
+            ctx->config.enable_validation ? (uint32_t)VALIDATION_LAYER_COUNT : 0u,
+        .ppEnabledLayerNames =
+            ctx->config.enable_validation ? VALIDATION_LAYERS : nullptr,
         .enabledExtensionCount = DEVICE_EXTENSION_COUNT,
         .ppEnabledExtensionNames = DEVICE_EXTENSIONS,
         .pEnabledFeatures = &device_features,
     };
 
-    VkResult result = vkCreateDevice(frame_data->physical_device, &create_info, nullptr,
-                                     &frame_data->logical_device);
+    VkResult result = vkCreateDevice(ctx->core.physical_device, &create_info, nullptr,
+                                     &ctx->core.logical_device);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create logical device");
 
     // Get both queue handles
-    vkGetDeviceQueue(frame_data->logical_device, frame_data->graphics_queue_family, 0,
-                     &frame_data->graphics_queue);
-    vkGetDeviceQueue(frame_data->logical_device, frame_data->present_queue_family, 0,
-                     &frame_data->present_queue);
+    vkGetDeviceQueue(ctx->core.logical_device, ctx->core.graphics_queue_family, 0,
+                     &ctx->core.graphics_queue);
+    vkGetDeviceQueue(ctx->core.logical_device, ctx->core.present_queue_family, 0,
+                     &ctx->core.present_queue);
 }
 
-void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
-                          VkSurfaceKHR surface, const GLFWwindow *window,
-                          candy_config *config, candy_frame_data *frame_data) {
+void candy_init_swapchain(candy_context *ctx) {
     candy_swapchain_support_details swapchain_details = {};
-    candy_queury_swapchain_support(physical_device, surface, &swapchain_details);
+    candy_queury_swapchain_support(ctx->core.physical_device, ctx->core.surface,
+                                   &swapchain_details);
 
     VkSurfaceFormatKHR surface_fmt = {};
     candy_choose_swap_surface_format(&surface_fmt, swapchain_details.formats,
@@ -912,24 +939,23 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
 
     VkExtent2D extent = {};
     candy_choose_swap_extent(&extent, swapchain_details.capabilities,
-                             (GLFWwindow *)window);
+                             (GLFWwindow *)ctx->core.window);
 
-    frame_data->swapchain_image_count =
+    ctx->swapchain.image_count =
         swapchain_details.capabilities.minImageCount +
         1; // +1 bcuz if its minImageCount we have to wait on driver
 
     if (swapchain_details.capabilities.maxImageCount > 0 &&
-        frame_data->swapchain_image_count >
-            swapchain_details.capabilities.maxImageCount) {
-        frame_data->swapchain_image_count = swapchain_details.capabilities.maxImageCount;
+        ctx->swapchain.image_count > swapchain_details.capabilities.maxImageCount) {
+        ctx->swapchain.image_count = swapchain_details.capabilities.maxImageCount;
     }
 
     VkSwapchainCreateInfoKHR create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .pNext = nullptr,
         .flags = 0,
-        .surface = surface,
-        .minImageCount = frame_data->swapchain_image_count,
+        .surface = ctx->core.surface,
+        .minImageCount = ctx->swapchain.image_count,
         .imageFormat = surface_fmt.format,
         .imageColorSpace = surface_fmt.colorSpace,
         .imageExtent = extent,
@@ -946,7 +972,7 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
 
     };
     candy_queue_family_indices indices =
-        candy_find_queue_families(physical_device, surface);
+        candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
     uint32_t queue_family_indicies[] = {indices.graphics_family, indices.present_family};
 
     if (indices.graphics_family != indices.present_family) {
@@ -958,32 +984,31 @@ void candy_init_swapchain(VkDevice device, VkPhysicalDevice physical_device,
         create_info.queueFamilyIndexCount = 0;
         create_info.pQueueFamilyIndices = nullptr;
     }
-    VkResult result =
-        vkCreateSwapchainKHR(device, &create_info, nullptr, &config->swapchain);
+    VkResult result = vkCreateSwapchainKHR(ctx->core.logical_device, &create_info,
+                                           nullptr, &ctx->swapchain.handle);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create swapchain");
-    vkGetSwapchainImagesKHR(device, config->swapchain, &frame_data->swapchain_image_count,
-                            nullptr);
-    if (frame_data->swapchain_image_count > 8) {
-        frame_data->swapchain_image_count = 8;
+    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
+                            &ctx->swapchain.image_count, nullptr);
+    if (ctx->swapchain.image_count > 8) {
+        ctx->swapchain.image_count = 8;
     }
-    vkGetSwapchainImagesKHR(device, config->swapchain, &frame_data->swapchain_image_count,
-                            frame_data->swapchain_images);
-    frame_data->swapchain_image_format = surface_fmt.format;
-    frame_data->swapchain_extent = extent;
+    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
+                            &ctx->swapchain.image_count, ctx->swapchain.images);
+    ctx->swapchain.image_format = surface_fmt.format;
+    ctx->swapchain.extent = extent;
 }
 
 // ============================================================================
 // PUBLIC API
 // ============================================================================
 
-void candy_init(candy_renderer *candy) {
-    candy->config = {
+void candy_init(candy_context *ctx) {
+    ctx->config = {
         .width = 800,
         .height = 600,
         .enable_validation = ENABLE_VALIDATION,
         .app_name = "Candy Renderer",
         .window_title = "Candy Window",
-        .swapchain = VK_NULL_HANDLE,
     };
 
     // Init GLFW
@@ -991,57 +1016,49 @@ void candy_init(candy_renderer *candy) {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-    candy->frame_data.window =
-        glfwCreateWindow(candy->config.width, candy->config.height,
-                         candy->config.window_title, nullptr, nullptr);
+    ctx->core.window = glfwCreateWindow(ctx->config.width, ctx->config.height,
+                                        ctx->config.window_title, nullptr, nullptr);
 
-    CANDY_ASSERT(candy->frame_data.window != nullptr, "Failed to create window");
+    CANDY_ASSERT(ctx->core.window != nullptr, "Failed to create window");
 
     // Init Vulkan
-    candy_init_vulkan_instance(&candy->vk_instance, &candy->config);
-    candy_init_surface(&candy->frame_data,
-                       &candy->vk_instance); // Create surface before picking device
-    candy_init_physical_device(&candy->frame_data, &candy->vk_instance);
-    candy_init_logical_device(&candy->frame_data, &candy->config);
-    candy_init_swapchain(candy->frame_data.logical_device,
-                         candy->frame_data.physical_device, candy->frame_data.surface,
-                         (const GLFWwindow *)candy->frame_data.window, &candy->config,
-                         &candy->frame_data);
-    candy_create_image_views(&candy->frame_data);
-    candy_create_render_pass(candy);
-    candy_create_graphics_pipeline(candy);
+    candy_init_vulkan_instance(&ctx->core, &ctx->config);
+    candy_init_surface(&ctx->core); // Create surface before picking device
+    candy_init_physical_device(&ctx->core);
+    candy_init_logical_device(ctx);
+    candy_init_swapchain(ctx);
+    candy_create_image_views(ctx);
+    candy_create_render_pass(ctx);
+    candy_create_graphics_pipeline(ctx);
 
     std::cout << "[CANDY] Init complete\n";
 }
 
-void candy_cleanup(candy_renderer *candy) {
-    vkDestroySwapchainKHR(candy->frame_data.logical_device, candy->config.swapchain,
-                          nullptr);
-    for (uint32_t i = 0; i < candy->frame_data.swapchain_images_view_count; ++i) {
-        vkDestroyImageView(candy->frame_data.logical_device,
-                           candy->frame_data.swapchain_image_views[i], nullptr);
+void candy_cleanup(candy_context *ctx) {
+    vkDestroySwapchainKHR(ctx->core.logical_device, ctx->swapchain.handle, nullptr);
+    for (uint32_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
+        vkDestroyImageView(ctx->core.logical_device, ctx->swapchain.image_views[i],
+                           nullptr);
     }
 
-    for (uint32_t i = 0; i < candy->shader_module_count; ++i) {
-        vkDestroyShaderModule(candy->frame_data.logical_device, candy->shader_modules[i],
+    for (uint32_t i = 0; i < ctx->pipeline.shader_module_count; ++i) {
+        vkDestroyShaderModule(ctx->core.logical_device, ctx->pipeline.shader_modules[i],
                               nullptr);
     }
-    vkDestroyRenderPass(candy->frame_data.logical_device, candy->render_pass, nullptr);
-    vkDestroyPipelineLayout(candy->frame_data.logical_device, candy->pipeline_layout,
+    vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
+    vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,
                             nullptr);
 
-    vkDestroyPipeline(candy->frame_data.logical_device, candy->graphics_pipeline,
-                      nullptr);
-    vkDestroyDevice(candy->frame_data.logical_device, nullptr);
+    vkDestroyPipeline(ctx->core.logical_device, ctx->pipeline.graphics_pipeline, nullptr);
+    vkDestroyDevice(ctx->core.logical_device, nullptr);
 
-    if (candy->config.enable_validation) {
-        candy_destroy_debug_messenger(candy->vk_instance.instance,
-                                      candy->vk_instance.debug_messenger);
+    if (ctx->config.enable_validation) {
+        candy_destroy_debug_messenger(ctx->core.instance, ctx->core.debug_messenger);
     }
-    vkDestroySurfaceKHR(candy->vk_instance.instance, candy->frame_data.surface, nullptr);
-    vkDestroyInstance(candy->vk_instance.instance, nullptr);
+    vkDestroySurfaceKHR(ctx->core.instance, ctx->core.surface, nullptr);
+    vkDestroyInstance(ctx->core.instance, nullptr);
 
-    glfwDestroyWindow(candy->frame_data.window);
+    glfwDestroyWindow(ctx->core.window);
     glfwTerminate();
 
     std::cout << "[CANDY] Cleanup complete\n";
@@ -1054,11 +1071,11 @@ void candy_cleanup(candy_renderer *candy) {
 int main() {
     std::cout << "[CANDY] Starting...\n";
 
-    candy_renderer candy = {};
+    candy_context candy = {};
 
     candy_init(&candy);
 
-    while (!glfwWindowShouldClose(candy.frame_data.window)) {
+    while (!glfwWindowShouldClose(candy.core.window)) {
         glfwPollEvents();
     }
 

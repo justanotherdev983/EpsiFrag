@@ -361,6 +361,61 @@ void candy_create_command_buffer(candy_context *ctx) {
     return;
 }
 
+void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = 0, // INFO: might have to change this later
+        .pInheritanceInfo = nullptr,
+    };
+
+    VkResult result = vkBeginCommandBuffer(ctx->frame_data.command_buffer, &begin_info);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to being record command buffer");
+
+    VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+    VkRenderPassBeginInfo render_pass_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext = nullptr,
+        .renderPass = ctx->pipeline.render_pass,
+        .framebuffer = ctx->swapchain.framebuffers[image_index],
+        .renderArea.offset = {0, 0},
+        .renderArea.extent = ctx->swapchain.extent,
+        .clearValueCount = 1,
+        .pClearValues = &clear_color,
+    };
+
+    vkCmdBeginRenderPass(ctx->frame_data.command_buffer, &render_pass_info,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(ctx->frame_data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      ctx->pipeline.graphics_pipeline);
+
+    VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = (float)ctx->swapchain.extent.width,
+        .height = (float)ctx->swapchain.extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(ctx->frame_data.command_buffer, 0, 1, &viewport);
+
+    VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = ctx->swapchain.extent,
+    };
+    vkCmdSetScissor(ctx->frame_data.command_buffer, 0, 1, &scissor);
+
+    vkCmdDraw(ctx->frame_data.command_buffer, 3, 1, 0, 0);
+    vkCmdEndRenderPass(ctx->frame_data.command_buffer);
+
+    VkResult result_end_cmd_buf = vkEndCommandBuffer(ctx->frame_data.command_buffer);
+    CANDY_ASSERT(result_end_cmd_buf == VK_SUCCESS, "Failed to record command buffer");
+
+    return;
+}
+
 // ============================================================================
 // GRAPHICS PIPELINE
 // ============================================================================
@@ -419,9 +474,7 @@ void candy_create_render_pass(candy_context *ctx) {
 static std::vector<char> candy_read_shader_file(const std::string &filename) {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
-    if (!file.is_open()) {
-        throw std::runtime_error("failed to open file!");
-    }
+    CANDY_ASSERT(file.is_open(), "Failed to open shader file");
 
     size_t file_size = (size_t)file.tellg();
     std::vector<char> buffer(file_size);
@@ -660,6 +713,10 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         &candy->pipeline.graphics_pipeline);
     CANDY_ASSERT(result_pipelines == VK_SUCCESS, "Failed to create pipeline layout");
 
+    vkDestroyShaderModule(candy->core.logical_device, vert_shader_module, nullptr);
+    vkDestroyShaderModule(candy->core.logical_device, frag_shader_module, nullptr);
+    candy->pipeline.shader_module_count = 0;
+
     return;
 }
 
@@ -704,8 +761,8 @@ void candy_create_image_views(candy_context *ctx) {
     ctx->swapchain.image_view_count = ctx->swapchain.image_count;
 }
 
-void candy_queury_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface,
-                                    candy_swapchain_support_details *details) {
+void candy_query_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface,
+                                   candy_swapchain_support_details *details) {
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details->capabilities);
     vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &details->format_count,
                                          nullptr);
@@ -851,7 +908,7 @@ bool candy_is_device_suitable(VkPhysicalDevice device, uint32_t graphics_family,
     bool is_swapchain_adequete = false;
     if (extensions_supported) {
         candy_swapchain_support_details swapchain_support = {};
-        candy_queury_swapchain_support(device, surface, &swapchain_support);
+        candy_query_swapchain_support(device, surface, &swapchain_support);
 
         is_swapchain_adequete = (swapchain_support.format_count > 0 &&
                                  swapchain_support.present_mode_count > 0);
@@ -997,8 +1054,8 @@ void candy_init_logical_device(candy_context *ctx) {
 
 void candy_init_swapchain(candy_context *ctx) {
     candy_swapchain_support_details swapchain_details = {};
-    candy_queury_swapchain_support(ctx->core.physical_device, ctx->core.surface,
-                                   &swapchain_details);
+    candy_query_swapchain_support(ctx->core.physical_device, ctx->core.surface,
+                                  &swapchain_details);
 
     VkSurfaceFormatKHR surface_fmt = {};
     candy_choose_swap_surface_format(&surface_fmt, swapchain_details.formats,
@@ -1110,8 +1167,9 @@ void candy_init(candy_context *ctx) {
 
 void candy_cleanup(candy_context *ctx) {
 
-    for (const auto &framebuffer : ctx->swapchain.framebuffers) {
-        vkDestroyFramebuffer(ctx->core.logical_device, framebuffer, nullptr);
+    for (uint32_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
+        vkDestroyFramebuffer(ctx->core.logical_device, ctx->swapchain.framebuffers[i],
+                             nullptr);
     }
 
     vkDestroySwapchainKHR(ctx->core.logical_device, ctx->swapchain.handle, nullptr);
@@ -1120,10 +1178,6 @@ void candy_cleanup(candy_context *ctx) {
                            nullptr);
     }
 
-    for (uint32_t i = 0; i < ctx->pipeline.shader_module_count; ++i) {
-        vkDestroyShaderModule(ctx->core.logical_device, ctx->pipeline.shader_modules[i],
-                              nullptr);
-    }
     vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
     vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,
                             nullptr);

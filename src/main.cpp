@@ -92,6 +92,7 @@ struct candy_renderer {
     uint32_t shader_module_count;
     VkRenderPass render_pass;
     VkPipelineLayout pipeline_layout;
+    VkPipeline graphics_pipeline;
 };
 
 // Helper for device selection
@@ -424,7 +425,7 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .pVertexAttributeDescriptions = nullptr,
     };
 
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {
         // We can use this to draw other things than triangles; set in topology
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
@@ -507,9 +508,8 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .logicOpEnable = VK_TRUE,   // this should also be false if you want no blend
-        .logicOp = VK_LOGIC_OP_AND, // WARNING: Should prob be VK_LOGIC_OP_COPY but idk
-                                    // for this blendmode
+        .logicOpEnable = VK_FALSE,
+        .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
         .blendConstants[0] = 0.0f,
@@ -532,6 +532,33 @@ void candy_create_graphics_pipeline(candy_renderer *candy) {
         vkCreatePipelineLayout(candy->frame_data.logical_device, &pipeline_layout_info,
                                nullptr, &candy->pipeline_layout);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create pipeline layout");
+
+    VkGraphicsPipelineCreateInfo pipeline_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .stageCount = 2,
+        .pStages = shader_stages,
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pTessellationState = nullptr,
+        .pViewportState = &viewport_state,
+        .pRasterizationState = &rasterizer,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = nullptr,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_state,
+        .layout = candy->pipeline_layout,
+        .renderPass = candy->render_pass,
+        .subpass = 0,
+        .basePipelineHandle = VK_NULL_HANDLE,
+        .basePipelineIndex = -1,
+    };
+
+    VkResult result_pipelines =
+        vkCreateGraphicsPipelines(candy->frame_data.logical_device, VK_NULL_HANDLE, 1,
+                                  &pipeline_info, nullptr, &candy->graphics_pipeline);
+    CANDY_ASSERT(result_pipelines == VK_SUCCESS, "Failed to create pipeline layout");
 
     return;
 }
@@ -999,9 +1026,12 @@ void candy_cleanup(candy_renderer *candy) {
         vkDestroyShaderModule(candy->frame_data.logical_device, candy->shader_modules[i],
                               nullptr);
     }
+    vkDestroyRenderPass(candy->frame_data.logical_device, candy->render_pass, nullptr);
     vkDestroyPipelineLayout(candy->frame_data.logical_device, candy->pipeline_layout,
                             nullptr);
-    vkDestroyRenderPass(candy->frame_data.logical_device, candy->render_pass, nullptr);
+
+    vkDestroyPipeline(candy->frame_data.logical_device, candy->graphics_pipeline,
+                      nullptr);
     vkDestroyDevice(candy->frame_data.logical_device, nullptr);
 
     if (candy->config.enable_validation) {

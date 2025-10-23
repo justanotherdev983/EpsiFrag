@@ -1198,6 +1198,15 @@ void candy_cleanup(candy_context *ctx) {
     std::cout << "[CANDY] Cleanup complete\n";
 }
 
+void candy_loop(candy_context *ctx) {
+
+    while (!glfwWindowShouldClose(ctx->core.window)) {
+        glfwPollEvents();
+    }
+
+    return;
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -1205,15 +1214,13 @@ void candy_cleanup(candy_context *ctx) {
 int main() {
     std::cout << "[CANDY] Starting...\n";
 
-    candy_context candy = {};
+    candy_context candy_ctx = {};
 
-    candy_init(&candy);
+    candy_init(&candy_ctx);
 
-    while (!glfwWindowShouldClose(candy.core.window)) {
-        glfwPollEvents();
-    }
+    candy_loop(&candy_ctx);
 
-    candy_cleanup(&candy);
+    candy_cleanup(&candy_ctx);
 
     return 0;
 }

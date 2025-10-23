@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <numeric>
+#include <ostream>
 #include <string.h>
 #include <vector> // For reading our shader files
 
@@ -60,7 +61,8 @@ struct candy_config {
 
 // Hot data - accessed every frame (cache-line aligned)
 struct alignas(64) candy_frame_data {
-    // For future command pools and in flight stuff
+    VkCommandPool command_pool;
+    VkCommandBuffer command_buffer;
 };
 
 // All core long-lived vulkan handles
@@ -290,6 +292,75 @@ candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
 
     return indices;
 }
+
+// ============================================================================
+// COMMAND BUFFERS
+// ============================================================================
+
+void candy_create_framebuffers(candy_context *ctx) {
+    if (ctx->swapchain.image_view_count > MAX_SWAPCHAIN_IMAGES) {
+        ctx->swapchain.image_view_count = MAX_SWAPCHAIN_IMAGES;
+    }
+
+    for (size_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
+        VkImageView attachments[] = {
+            ctx->swapchain.image_views[i],
+        };
+
+        VkFramebufferCreateInfo framebuffer_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .renderPass = ctx->pipeline.render_pass,
+            .attachmentCount = 1,
+            .pAttachments = attachments,
+            .width = ctx->swapchain.extent.width,
+            .height = ctx->swapchain.extent.height,
+            .layers = 1,
+        };
+
+        VkResult result = vkCreateFramebuffer(ctx->core.logical_device, &framebuffer_info,
+                                              nullptr, &ctx->swapchain.framebuffers[i]);
+        CANDY_ASSERT(result == VK_SUCCESS, "Failed to create framebuffer");
+    }
+
+    return;
+}
+
+void candy_create_command_pool(candy_context *ctx) {
+    candy_queue_family_indices queue_family_indicies =
+        candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
+
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queue_family_indicies.graphics_family,
+    };
+
+    VkResult result = vkCreateCommandPool(ctx->core.logical_device, &pool_info, nullptr,
+                                          &ctx->frame_data.command_pool);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command pool");
+    return;
+}
+
+void candy_create_command_buffer(candy_context *ctx) {
+
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = ctx->frame_data.command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+
+    VkResult result = vkAllocateCommandBuffers(ctx->core.logical_device, &alloc_info,
+                                               &ctx->frame_data.command_buffer);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command buffer");
+
+    return;
+}
+
 // ============================================================================
 // GRAPHICS PIPELINE
 // ============================================================================
@@ -1030,11 +1101,19 @@ void candy_init(candy_context *ctx) {
     candy_create_image_views(ctx);
     candy_create_render_pass(ctx);
     candy_create_graphics_pipeline(ctx);
+    candy_create_framebuffers(ctx);
+    candy_create_command_pool(ctx);
+    candy_create_command_buffer(ctx);
 
     std::cout << "[CANDY] Init complete\n";
 }
 
 void candy_cleanup(candy_context *ctx) {
+
+    for (const auto &framebuffer : ctx->swapchain.framebuffers) {
+        vkDestroyFramebuffer(ctx->core.logical_device, framebuffer, nullptr);
+    }
+
     vkDestroySwapchainKHR(ctx->core.logical_device, ctx->swapchain.handle, nullptr);
     for (uint32_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
         vkDestroyImageView(ctx->core.logical_device, ctx->swapchain.image_views[i],
@@ -1050,6 +1129,7 @@ void candy_cleanup(candy_context *ctx) {
                             nullptr);
 
     vkDestroyPipeline(ctx->core.logical_device, ctx->pipeline.graphics_pipeline, nullptr);
+    vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pool, nullptr);
     vkDestroyDevice(ctx->core.logical_device, nullptr);
 
     if (ctx->config.enable_validation) {

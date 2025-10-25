@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <numeric>
 #include <ostream>
 #include <string.h>
 #include <vector> // For reading our shader files
@@ -63,6 +62,9 @@ struct candy_config {
 struct alignas(64) candy_frame_data {
     VkCommandPool command_pool;
     VkCommandBuffer command_buffer;
+    VkSemaphore image_available_semaphore;
+    VkSemaphore render_finished_semaphore;
+    VkFence in_flight_fence;
 };
 
 // All core long-lived vulkan handles
@@ -123,6 +125,7 @@ struct candy_context {
 };
 
 // Helper for device selection
+
 struct candy_device_list {
     VkPhysicalDevice handles[16];
     uint32_t graphics_queue_families[16];
@@ -417,6 +420,94 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
 }
 
 // ============================================================================
+// RENDERING
+// ============================================================================
+
+void candy_create_sync_objs(candy_context *ctx) {
+    VkSemaphoreCreateInfo sema_create_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+    };
+
+    VkFenceCreateInfo fence_create_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+
+    VkResult sema_result_img =
+        vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
+                          &ctx->frame_data.image_available_semaphore);
+    CANDY_ASSERT(sema_result_img == VK_SUCCESS,
+                 "failed to create image available semaphore");
+
+    VkResult sema_result_rendr =
+        vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
+                          &ctx->frame_data.render_finished_semaphore);
+    CANDY_ASSERT(sema_result_rendr == VK_SUCCESS,
+                 "Failed to create render finished semaphore");
+    VkResult fence_result = vkCreateFence(ctx->core.logical_device, &fence_create_info,
+                                          nullptr, &ctx->frame_data.in_flight_fence);
+    CANDY_ASSERT(fence_result == VK_SUCCESS, "Failed to create fence");
+
+    return;
+}
+
+void candy_draw_frame(candy_context *ctx) {
+    vkWaitForFences(ctx->core.logical_device, 1, &ctx->frame_data.in_flight_fence,
+                    VK_TRUE, UINT32_MAX); // For DoD we need to make arra of fences and
+                                          // use that instead of 1 here
+    vkResetFences(ctx->core.logical_device, 1, &ctx->frame_data.in_flight_fence);
+
+    uint32_t image_index;
+
+    vkAcquireNextImageKHR(ctx->core.logical_device, ctx->swapchain.handle, UINT64_MAX,
+                          ctx->frame_data.image_available_semaphore, VK_NULL_HANDLE,
+                          &image_index); // dont know if this is correct
+
+    vkResetCommandBuffer(ctx->frame_data.command_buffer, 0);
+    candy_record_command_buffer(ctx, image_index);
+
+    VkSemaphore wait_semaphores[] = {ctx->frame_data.image_available_semaphore};
+    VkSemaphore signal_semaphores[] = {ctx->frame_data.render_finished_semaphore};
+    VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = wait_semaphores,
+        .pWaitDstStageMask = wait_stages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->frame_data.command_buffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = signal_semaphores,
+    };
+
+    VkResult result = vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info,
+                                    ctx->frame_data.in_flight_fence);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to submit draw command buffer");
+
+    VkSwapchainKHR swapchains = {ctx->swapchain.handle};
+
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = signal_semaphores,
+        .swapchainCount = 1,
+        .pSwapchains = &swapchains,
+        .pImageIndices = &image_index,
+        .pResults = nullptr, // WARNING: we only have a single swapchain for now
+    };
+
+    vkQueuePresentKHR(ctx->core.present_queue, &present_info);
+
+    return;
+}
+
+// ============================================================================
 // GRAPHICS PIPELINE
 // ============================================================================
 
@@ -437,6 +528,16 @@ void candy_create_render_pass(candy_context *ctx) {
         .attachment =
             0, // we only have 1 for now, later post processing but for now index 0
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    VkSubpassDependency dependency = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dependencyFlags = 0,
     };
 
     VkSubpassDescription subpass = {
@@ -460,8 +561,8 @@ void candy_create_render_pass(candy_context *ctx) {
         .pAttachments = &color_attachment,
         .subpassCount = 1,
         .pSubpasses = &subpass,
-        .dependencyCount = 0,
-        .pDependencies = nullptr,
+        .dependencyCount = 1,
+        .pDependencies = &dependency,
     };
 
     VkResult result = vkCreateRenderPass(ctx->core.logical_device, &render_pass_info,
@@ -545,6 +646,7 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
         .module = candy->pipeline.shader_modules[frag_module_idx],
         .pName = "main",
+
         .pSpecializationInfo = nullptr,
     };
 
@@ -591,6 +693,7 @@ void candy_create_graphics_pipeline(candy_context *candy) {
     /*
     VkViewport viewport = {
         .x = 0.0f,
+
         .y = 0.0f,
         .width = (float)candy->swapchain.extent.width,
         .height = (float)candy->swapchain.extent.height,
@@ -705,6 +808,7 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         .renderPass = candy->pipeline.render_pass,
         .subpass = 0,
         .basePipelineHandle = VK_NULL_HANDLE,
+
         .basePipelineIndex = -1,
     };
 
@@ -930,6 +1034,7 @@ uint32_t candy_pick_best_device(const candy_device_list *devices, VkSurfaceKHR s
 
 // ============================================================================
 // INITIALIZATION
+
 // ============================================================================
 
 void candy_init_vulkan_instance(candy_core *vk_instance, const candy_config *config) {
@@ -944,7 +1049,8 @@ void candy_init_vulkan_instance(candy_core *vk_instance, const candy_config *con
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "Candy Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_0,
+        .apiVersion = VK_API_VERSION_1_0, // WARNING: Make this newer after we are done
+                                          // with triangel
     };
 
     const char *extensions[32];
@@ -1014,6 +1120,7 @@ void candy_init_logical_device(candy_context *ctx) {
     VkDeviceQueueCreateInfo queue_infos[2];
 
     for (uint32_t i = 0; i < unique_count; ++i) {
+
         queue_infos[i] = {
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
             .pNext = nullptr,
@@ -1151,7 +1258,7 @@ void candy_init(candy_context *ctx) {
 
     // Init Vulkan
     candy_init_vulkan_instance(&ctx->core, &ctx->config);
-    candy_init_surface(&ctx->core); // Create surface before picking device
+    candy_init_surface(&ctx->core);
     candy_init_physical_device(&ctx->core);
     candy_init_logical_device(ctx);
     candy_init_swapchain(ctx);
@@ -1161,6 +1268,7 @@ void candy_init(candy_context *ctx) {
     candy_create_framebuffers(ctx);
     candy_create_command_pool(ctx);
     candy_create_command_buffer(ctx);
+    candy_create_sync_objs(ctx);
 
     std::cout << "[CANDY] Init complete\n";
 }
@@ -1184,6 +1292,13 @@ void candy_cleanup(candy_context *ctx) {
 
     vkDestroyPipeline(ctx->core.logical_device, ctx->pipeline.graphics_pipeline, nullptr);
     vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pool, nullptr);
+
+    vkDestroySemaphore(ctx->core.logical_device,
+                       ctx->frame_data.image_available_semaphore, nullptr);
+    vkDestroySemaphore(ctx->core.logical_device,
+                       ctx->frame_data.render_finished_semaphore, nullptr);
+    vkDestroyFence(ctx->core.logical_device, ctx->frame_data.in_flight_fence, nullptr);
+
     vkDestroyDevice(ctx->core.logical_device, nullptr);
 
     if (ctx->config.enable_validation) {
@@ -1202,7 +1317,9 @@ void candy_loop(candy_context *ctx) {
 
     while (!glfwWindowShouldClose(ctx->core.window)) {
         glfwPollEvents();
+        candy_draw_frame(ctx);
     }
+    vkDeviceWaitIdle(ctx->core.logical_device);
 
     return;
 }

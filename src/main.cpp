@@ -39,6 +39,8 @@ constexpr uint32_t INVALID_QUEUE_FAMILY = UINT32_MAX;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 8;
 constexpr uint32_t MAX_SHADER_MODULES = 16;
 
+constexpr uint32_t MAX_FRAME_IN_FLIGHT = 2;
+
 #ifdef NDEBUG
 constexpr bool ENABLE_VALIDATION = false;
 #else
@@ -60,11 +62,12 @@ struct candy_config {
 
 // Hot data - accessed every frame (cache-line aligned)
 struct alignas(64) candy_frame_data {
-    VkCommandPool command_pool;
-    VkCommandBuffer command_buffer;
-    VkSemaphore image_available_semaphore;
-    VkSemaphore render_finished_semaphore;
-    VkFence in_flight_fence;
+    VkCommandPool command_pools[MAX_FRAME_IN_FLIGHT];
+    VkCommandBuffer command_buffers[MAX_FRAME_IN_FLIGHT];
+    VkSemaphore image_available_semaphores[MAX_FRAME_IN_FLIGHT];
+    VkSemaphore render_finished_semaphores[MAX_FRAME_IN_FLIGHT];
+    VkFence in_flight_fences[MAX_FRAME_IN_FLIGHT];
+    uint32_t current_frame;
 };
 
 // All core long-lived vulkan handles
@@ -330,41 +333,47 @@ void candy_create_framebuffers(candy_context *ctx) {
     return;
 }
 
-void candy_create_command_pool(candy_context *ctx) {
+void candy_create_command_pools(candy_context *ctx) {
     candy_queue_family_indices queue_family_indicies =
         candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
 
-    VkCommandPoolCreateInfo pool_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = queue_family_indicies.graphics_family,
-    };
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
+        VkCommandPoolCreateInfo pool_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = queue_family_indicies.graphics_family,
+        };
 
-    VkResult result = vkCreateCommandPool(ctx->core.logical_device, &pool_info, nullptr,
-                                          &ctx->frame_data.command_pool);
-    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command pool");
-    return;
-}
-
-void candy_create_command_buffer(candy_context *ctx) {
-
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .pNext = nullptr,
-        .commandPool = ctx->frame_data.command_pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-
-    VkResult result = vkAllocateCommandBuffers(ctx->core.logical_device, &alloc_info,
-                                               &ctx->frame_data.command_buffer);
-    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command buffer");
+        VkResult result = vkCreateCommandPool(ctx->core.logical_device, &pool_info,
+                                              nullptr, &ctx->frame_data.command_pools[i]);
+        CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command pool");
+    }
 
     return;
 }
 
-void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
+void candy_create_command_buffers(candy_context *ctx) {
+
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
+
+        VkCommandBufferAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = nullptr,
+            .commandPool = ctx->frame_data.command_pools[i],
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+
+        VkResult result = vkAllocateCommandBuffers(ctx->core.logical_device, &alloc_info,
+                                                   &ctx->frame_data.command_buffers[i]);
+        CANDY_ASSERT(result == VK_SUCCESS, "Failed to create command buffer");
+    }
+    return;
+}
+
+void candy_record_command_buffer(candy_context *ctx, uint32_t image_index,
+                                 uint32_t cmd_buf_indx) {
 
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -373,7 +382,8 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
         .pInheritanceInfo = nullptr,
     };
 
-    VkResult result = vkBeginCommandBuffer(ctx->frame_data.command_buffer, &begin_info);
+    VkResult result =
+        vkBeginCommandBuffer(ctx->frame_data.command_buffers[cmd_buf_indx], &begin_info);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to being record command buffer");
 
     VkClearValue clear_color = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
@@ -388,11 +398,11 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
         .pClearValues = &clear_color,
     };
 
-    vkCmdBeginRenderPass(ctx->frame_data.command_buffer, &render_pass_info,
+    vkCmdBeginRenderPass(ctx->frame_data.command_buffers[cmd_buf_indx], &render_pass_info,
                          VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdBindPipeline(ctx->frame_data.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      ctx->pipeline.graphics_pipeline);
+    vkCmdBindPipeline(ctx->frame_data.command_buffers[cmd_buf_indx],
+                      VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipeline.graphics_pipeline);
 
     VkViewport viewport = {
         .x = 0.0f,
@@ -402,18 +412,19 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index) {
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
-    vkCmdSetViewport(ctx->frame_data.command_buffer, 0, 1, &viewport);
+    vkCmdSetViewport(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1, &viewport);
 
     VkRect2D scissor = {
         .offset = {0, 0},
         .extent = ctx->swapchain.extent,
     };
-    vkCmdSetScissor(ctx->frame_data.command_buffer, 0, 1, &scissor);
+    vkCmdSetScissor(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1, &scissor);
 
-    vkCmdDraw(ctx->frame_data.command_buffer, 3, 1, 0, 0);
-    vkCmdEndRenderPass(ctx->frame_data.command_buffer);
+    vkCmdDraw(ctx->frame_data.command_buffers[cmd_buf_indx], 3, 1, 0, 0);
+    vkCmdEndRenderPass(ctx->frame_data.command_buffers[cmd_buf_indx]);
 
-    VkResult result_end_cmd_buf = vkEndCommandBuffer(ctx->frame_data.command_buffer);
+    VkResult result_end_cmd_buf =
+        vkEndCommandBuffer(ctx->frame_data.command_buffers[cmd_buf_indx]);
     CANDY_ASSERT(result_end_cmd_buf == VK_SUCCESS, "Failed to record command buffer");
 
     return;
@@ -436,42 +447,55 @@ void candy_create_sync_objs(candy_context *ctx) {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    VkResult sema_result_img =
-        vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
-                          &ctx->frame_data.image_available_semaphore);
-    CANDY_ASSERT(sema_result_img == VK_SUCCESS,
-                 "failed to create image available semaphore");
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
 
-    VkResult sema_result_rendr =
-        vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
-                          &ctx->frame_data.render_finished_semaphore);
-    CANDY_ASSERT(sema_result_rendr == VK_SUCCESS,
-                 "Failed to create render finished semaphore");
-    VkResult fence_result = vkCreateFence(ctx->core.logical_device, &fence_create_info,
-                                          nullptr, &ctx->frame_data.in_flight_fence);
-    CANDY_ASSERT(fence_result == VK_SUCCESS, "Failed to create fence");
+        VkResult sema_result_img =
+            vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
+                              &ctx->frame_data.image_available_semaphores[i]);
+        CANDY_ASSERT(sema_result_img == VK_SUCCESS,
+                     "failed to create image available semaphore");
+
+        VkResult sema_result_rendr =
+            vkCreateSemaphore(ctx->core.logical_device, &sema_create_info, nullptr,
+                              &ctx->frame_data.render_finished_semaphores[i]);
+        CANDY_ASSERT(sema_result_rendr == VK_SUCCESS,
+                     "Failed to create render finished semaphore");
+
+        VkResult fence_result =
+            vkCreateFence(ctx->core.logical_device, &fence_create_info, nullptr,
+                          &ctx->frame_data.in_flight_fences[i]);
+        CANDY_ASSERT(fence_result == VK_SUCCESS, "Failed to create fence");
+    }
 
     return;
 }
 
 void candy_draw_frame(candy_context *ctx) {
-    vkWaitForFences(ctx->core.logical_device, 1, &ctx->frame_data.in_flight_fence,
-                    VK_TRUE, UINT32_MAX); // For DoD we need to make arra of fences and
-                                          // use that instead of 1 here
-    vkResetFences(ctx->core.logical_device, 1, &ctx->frame_data.in_flight_fence);
+    vkWaitForFences(ctx->core.logical_device, 1,
+                    &ctx->frame_data.in_flight_fences[ctx->frame_data.current_frame],
+                    VK_TRUE,
+                    UINT32_MAX); // For DoD we need to make arra of fences and
+                                 // use that instead of 1 here
+    vkResetFences(ctx->core.logical_device, 1,
+                  &ctx->frame_data.in_flight_fences[ctx->frame_data.current_frame]);
 
     uint32_t image_index;
 
-    vkAcquireNextImageKHR(ctx->core.logical_device, ctx->swapchain.handle, UINT64_MAX,
-                          ctx->frame_data.image_available_semaphore, VK_NULL_HANDLE,
-                          &image_index); // dont know if this is correct
+    vkAcquireNextImageKHR(
+        ctx->core.logical_device, ctx->swapchain.handle, UINT64_MAX,
+        ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame],
+        VK_NULL_HANDLE,
+        &image_index); // dont know if this is correct
 
-    vkResetCommandBuffer(ctx->frame_data.command_buffer, 0);
-    candy_record_command_buffer(ctx, image_index);
-
-    VkSemaphore wait_semaphores[] = {ctx->frame_data.image_available_semaphore};
-    VkSemaphore signal_semaphores[] = {ctx->frame_data.render_finished_semaphore};
+    VkSemaphore wait_semaphores[] = {
+        ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame]};
+    VkSemaphore signal_semaphores[] = {
+        ctx->frame_data.render_finished_semaphores[ctx->frame_data.current_frame]};
     VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    vkResetCommandBuffer(ctx->frame_data.command_buffers[ctx->frame_data.current_frame],
+                         0);
+    candy_record_command_buffer(ctx, image_index, ctx->frame_data.current_frame);
 
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -480,13 +504,15 @@ void candy_draw_frame(candy_context *ctx) {
         .pWaitSemaphores = wait_semaphores,
         .pWaitDstStageMask = wait_stages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &ctx->frame_data.command_buffer,
+        .pCommandBuffers =
+            &ctx->frame_data.command_buffers[ctx->frame_data.current_frame],
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = signal_semaphores,
     };
 
-    VkResult result = vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info,
-                                    ctx->frame_data.in_flight_fence);
+    VkResult result =
+        vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info,
+                      ctx->frame_data.in_flight_fences[ctx->frame_data.current_frame]);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to submit draw command buffer");
 
     VkSwapchainKHR swapchains = {ctx->swapchain.handle};
@@ -503,6 +529,9 @@ void candy_draw_frame(candy_context *ctx) {
     };
 
     vkQueuePresentKHR(ctx->core.present_queue, &present_info);
+
+    ctx->frame_data.current_frame =
+        (ctx->frame_data.current_frame + 1) % MAX_FRAME_IN_FLIGHT;
 
     return;
 }
@@ -1266,8 +1295,8 @@ void candy_init(candy_context *ctx) {
     candy_create_render_pass(ctx);
     candy_create_graphics_pipeline(ctx);
     candy_create_framebuffers(ctx);
-    candy_create_command_pool(ctx);
-    candy_create_command_buffer(ctx);
+    candy_create_command_pools(ctx);
+    candy_create_command_buffers(ctx);
     candy_create_sync_objs(ctx);
 
     std::cout << "[CANDY] Init complete\n";
@@ -1291,13 +1320,19 @@ void candy_cleanup(candy_context *ctx) {
                             nullptr);
 
     vkDestroyPipeline(ctx->core.logical_device, ctx->pipeline.graphics_pipeline, nullptr);
-    vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pool, nullptr);
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
+        vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pools[i],
+                             nullptr);
+    }
 
-    vkDestroySemaphore(ctx->core.logical_device,
-                       ctx->frame_data.image_available_semaphore, nullptr);
-    vkDestroySemaphore(ctx->core.logical_device,
-                       ctx->frame_data.render_finished_semaphore, nullptr);
-    vkDestroyFence(ctx->core.logical_device, ctx->frame_data.in_flight_fence, nullptr);
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
+        vkDestroySemaphore(ctx->core.logical_device,
+                           ctx->frame_data.image_available_semaphores[i], nullptr);
+        vkDestroySemaphore(ctx->core.logical_device,
+                           ctx->frame_data.render_finished_semaphores[i], nullptr);
+        vkDestroyFence(ctx->core.logical_device, ctx->frame_data.in_flight_fences[i],
+                       nullptr);
+    }
 
     vkDestroyDevice(ctx->core.logical_device, nullptr);
 

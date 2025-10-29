@@ -109,3 +109,8 @@ EpsiFrag/
 - Swapchain management
 - Graphics pipeline setup
 
+## Cloc CMD
+```bash
+cloc --exclude-dir=build,libs .
+```
+

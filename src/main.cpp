@@ -1,172 +1,5 @@
-#include <algorithm>
-#include <cassert>
-#include <cstdint>
-#include <fstream>
-#include <iostream>
-#include <ostream>
-#include <string.h>
-#include <vector> // For reading our shader files
-
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
-
-#include "backends/imgui_impl_glfw.h"
-#include "backends/imgui_impl_vulkan.h"
-#include "imgui.h"
+#include "core.h"
 #include <vulkan/vulkan_core.h>
-
-// ============================================================================
-// ERROR HANDLING
-// ============================================================================
-
-#define CANDY_ASSERT(condition, message)                                                 \
-    do {                                                                                 \
-        if (!(condition)) {                                                              \
-            std::cerr << "[CANDY ASSERT FAILED] " << message << std::endl;               \
-            assert(condition);                                                           \
-        }                                                                                \
-    } while (0)
-
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
-constexpr const char *VALIDATION_LAYERS[] = {"VK_LAYER_KHRONOS_validation"};
-constexpr size_t VALIDATION_LAYER_COUNT = 1;
-
-// Device extensions required for rendering
-constexpr const char *DEVICE_EXTENSIONS[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-constexpr size_t DEVICE_EXTENSION_COUNT = 1;
-
-constexpr uint32_t INVALID_QUEUE_FAMILY = UINT32_MAX;
-constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 8;
-constexpr uint32_t MAX_SHADER_MODULES = 16;
-
-constexpr uint32_t MAX_FRAME_IN_FLIGHT = 2;
-
-#ifdef NDEBUG
-constexpr bool ENABLE_VALIDATION = false;
-#else
-constexpr bool ENABLE_VALIDATION = true;
-#endif
-
-// ============================================================================
-// CANDY DATA STRUCTURES
-// ============================================================================
-
-// Cold data - only used during initialization
-struct candy_config {
-    uint32_t width;
-    uint32_t height;
-    bool enable_validation;
-    const char *app_name;
-    const char *window_title;
-};
-
-// Hot data - accessed every frame (cache-line aligned)
-struct alignas(64) candy_frame_data {
-    VkCommandPool command_pools[MAX_FRAME_IN_FLIGHT];
-    VkCommandBuffer command_buffers[MAX_FRAME_IN_FLIGHT];
-    VkSemaphore image_available_semaphores[MAX_FRAME_IN_FLIGHT];
-    VkSemaphore render_finished_semaphores[MAX_FRAME_IN_FLIGHT];
-    VkFence in_flight_fences[MAX_FRAME_IN_FLIGHT];
-    uint32_t current_frame;
-};
-
-// All core long-lived vulkan handles
-struct candy_core {
-    VkInstance instance;
-    VkDebugUtilsMessengerEXT debug_messenger;
-
-    GLFWwindow *window;
-    VkSurfaceKHR surface;
-    VkPhysicalDevice physical_device;
-    VkDevice logical_device;
-
-    VkQueue graphics_queue;
-    VkQueue present_queue;
-    uint32_t graphics_queue_family;
-    uint32_t present_queue_family;
-};
-
-// This is "warm" data. This is all recreated together when the window is resized.
-struct candy_swapchain {
-    VkSwapchainKHR handle;
-    VkFormat image_format;
-    VkExtent2D extent;
-    uint32_t image_count;
-    uint32_t image_view_count;
-
-    // We get the images from the swapchain, but we create the views and framebuffers.
-    VkImageView image_views[MAX_SWAPCHAIN_IMAGES];
-    VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
-    VkImage images[MAX_SWAPCHAIN_IMAGES];
-};
-
-struct candy_pipeline {
-    VkRenderPass render_pass;
-    VkPipelineLayout pipeline_layout;
-    VkPipeline graphics_pipeline;
-
-    // Shader modules are only needed for pipeline creation.
-    // They are effectively "cold" data for a specific pipeline.
-    VkShaderModule shader_modules[MAX_SHADER_MODULES];
-    uint32_t shader_module_count;
-};
-
-// ImGui-specific data (kept separate for DoD)
-struct candy_imgui {
-    VkDescriptorPool descriptor_pool;
-    VkRenderPass render_pass;
-    bool initialized;
-
-    // Menu state data
-    bool show_menu;
-    float menu_alpha;
-};
-
-// Main candy context
-struct candy_context {
-    // --- ImGui ---
-    candy_imgui imgui;
-
-    // --- Cold Data ---
-    candy_config config;
-
-    // --- Core Systems ---
-    candy_core core;
-
-    // --- Rendering Pipeline (recreated if swapchain changes format) ---
-    candy_swapchain swapchain;
-    candy_pipeline pipeline;
-
-    // --- Hot Data ---
-    candy_frame_data frame_data;
-};
-
-// Helper for device selection
-
-struct candy_device_list {
-    VkPhysicalDevice handles[16];
-    uint32_t graphics_queue_families[16];
-    uint32_t present_queue_families[16];
-    uint32_t count;
-};
-
-// Helper for storing queue family indices
-struct candy_queue_family_indices {
-    uint32_t graphics_family;
-    uint32_t present_family;
-};
-
-// Helper for swapchain init
-struct candy_swapchain_support_details {
-    VkSurfaceCapabilitiesKHR capabilities;
-    VkSurfaceFormatKHR formats[32];
-    uint32_t format_count;
-    VkPresentModeKHR present_modes[16];
-    uint32_t present_mode_count;
-};
 
 // ============================================================================
 // DEBUG CALLBACKS
@@ -741,12 +574,18 @@ void candy_draw_frame(candy_context *ctx) {
 
     uint32_t image_index;
 
-    vkAcquireNextImageKHR(
+    VkResult result_acq_img = vkAcquireNextImageKHR(
         ctx->core.logical_device, ctx->swapchain.handle, UINT64_MAX,
         ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame],
         VK_NULL_HANDLE,
         &image_index); // dont know if this is correct
-
+    if (result_acq_img == VK_ERROR_OUT_OF_DATE_KHR) {
+        candy_recreate_swapchain(ctx);
+        return;
+    } else {
+        CANDY_ASSERT(result_acq_img == VK_SUCCESS || result_acq_img == VK_SUBOPTIMAL_KHR,
+                     "Failed to acquire swapchain image");
+    }
     VkSemaphore wait_semaphores[] = {
         ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame]};
     VkSemaphore signal_semaphores[] = {
@@ -790,8 +629,14 @@ void candy_draw_frame(candy_context *ctx) {
         .pResults = nullptr, // WARNING: we only have a single swapchain for now
     };
 
-    vkQueuePresentKHR(ctx->core.present_queue, &present_info);
-
+    VkResult result_q_pres = vkQueuePresentKHR(ctx->core.present_queue, &present_info);
+    if (result_q_pres == VK_ERROR_OUT_OF_DATE_KHR) {
+        candy_recreate_swapchain(ctx);
+        return;
+    } else {
+        CANDY_ASSERT(result_q_pres == VK_SUCCESS || result_q_pres == VK_SUBOPTIMAL_KHR,
+                     "Failed to persent swapchain image");
+    }
     ctx->frame_data.current_frame =
         (ctx->frame_data.current_frame + 1) % MAX_FRAME_IN_FLIGHT;
 
@@ -1231,6 +1076,88 @@ void candy_choose_swap_extent(VkExtent2D *extent,
     }
 }
 
+void candy_create_swapchain(candy_context *ctx) {
+    candy_swapchain_support_details swapchain_details = {};
+    candy_query_swapchain_support(ctx->core.physical_device, ctx->core.surface,
+                                  &swapchain_details);
+
+    VkSurfaceFormatKHR surface_fmt = {};
+    candy_choose_swap_surface_format(&surface_fmt, swapchain_details.formats,
+                                     swapchain_details.format_count);
+
+    VkPresentModeKHR present_mode = {};
+    candy_choose_swap_present_mode(&present_mode, swapchain_details.present_modes,
+                                   swapchain_details.present_mode_count);
+
+    VkExtent2D extent = {};
+    candy_choose_swap_extent(&extent, swapchain_details.capabilities,
+                             (GLFWwindow *)ctx->core.window);
+
+    ctx->swapchain.image_count =
+        swapchain_details.capabilities.minImageCount +
+        1; // +1 bcuz if its minImageCount we have to wait on driver
+
+    if (swapchain_details.capabilities.maxImageCount > 0 &&
+        ctx->swapchain.image_count > swapchain_details.capabilities.maxImageCount) {
+        ctx->swapchain.image_count = swapchain_details.capabilities.maxImageCount;
+    }
+
+    VkSwapchainCreateInfoKHR create_info = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .pNext = nullptr,
+        .flags = 0,
+        .surface = ctx->core.surface,
+        .minImageCount = ctx->swapchain.image_count,
+        .imageFormat = surface_fmt.format,
+        .imageColorSpace = surface_fmt.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,                             // We dont need other
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // Bcuz we dont do things like
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+        .preTransform = swapchain_details.capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = present_mode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE, // For now assume only create 1 swapchain
+
+    };
+    candy_queue_family_indices indices =
+        candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
+    uint32_t queue_family_indicies[] = {indices.graphics_family, indices.present_family};
+
+    if (indices.graphics_family != indices.present_family) {
+        create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        create_info.queueFamilyIndexCount = 2;
+        create_info.pQueueFamilyIndices = queue_family_indicies;
+    } else {
+        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        create_info.queueFamilyIndexCount = 0;
+        create_info.pQueueFamilyIndices = nullptr;
+    }
+    VkResult result = vkCreateSwapchainKHR(ctx->core.logical_device, &create_info,
+                                           nullptr, &ctx->swapchain.handle);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create swapchain");
+    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
+                            &ctx->swapchain.image_count, nullptr);
+    if (ctx->swapchain.image_count > 8) {
+        ctx->swapchain.image_count = 8;
+    }
+    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
+                            &ctx->swapchain.image_count, ctx->swapchain.images);
+    ctx->swapchain.image_format = surface_fmt.format;
+    ctx->swapchain.extent = extent;
+}
+
+void candy_recreate_swapchain(candy_context *ctx) {
+    vkDeviceWaitIdle(ctx->core.logical_device);
+    candy_destroy_swapchain(ctx);
+    candy_create_swapchain(ctx);
+    candy_create_image_views(ctx);
+    candy_create_framebuffers(ctx);
+}
+
 // ============================================================================
 // DEVICE SELECTION
 // ============================================================================
@@ -1325,7 +1252,24 @@ uint32_t candy_pick_best_device(const candy_device_list *devices, VkSurfaceKHR s
 
 // ============================================================================
 // INITIALIZATION
+// ============================================================================
 
+void candy_destroy_swapchain(candy_context *ctx) {
+    for (size_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
+        vkDestroyFramebuffer(ctx->core.logical_device, ctx->swapchain.framebuffers[i],
+                             nullptr);
+    }
+
+    for (size_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
+        vkDestroyImageView(ctx->core.logical_device, ctx->swapchain.image_views[i],
+                           nullptr);
+    }
+
+    vkDestroySwapchainKHR(ctx->core.logical_device, ctx->swapchain.handle, nullptr);
+}
+
+// ============================================================================
+// INITIALIZATION
 // ============================================================================
 
 void candy_init_vulkan_instance(candy_core *vk_instance, const candy_config *config) {
@@ -1450,80 +1394,6 @@ void candy_init_logical_device(candy_context *ctx) {
                      &ctx->core.present_queue);
 }
 
-void candy_init_swapchain(candy_context *ctx) {
-    candy_swapchain_support_details swapchain_details = {};
-    candy_query_swapchain_support(ctx->core.physical_device, ctx->core.surface,
-                                  &swapchain_details);
-
-    VkSurfaceFormatKHR surface_fmt = {};
-    candy_choose_swap_surface_format(&surface_fmt, swapchain_details.formats,
-                                     swapchain_details.format_count);
-
-    VkPresentModeKHR present_mode = {};
-    candy_choose_swap_present_mode(&present_mode, swapchain_details.present_modes,
-                                   swapchain_details.present_mode_count);
-
-    VkExtent2D extent = {};
-    candy_choose_swap_extent(&extent, swapchain_details.capabilities,
-                             (GLFWwindow *)ctx->core.window);
-
-    ctx->swapchain.image_count =
-        swapchain_details.capabilities.minImageCount +
-        1; // +1 bcuz if its minImageCount we have to wait on driver
-
-    if (swapchain_details.capabilities.maxImageCount > 0 &&
-        ctx->swapchain.image_count > swapchain_details.capabilities.maxImageCount) {
-        ctx->swapchain.image_count = swapchain_details.capabilities.maxImageCount;
-    }
-
-    VkSwapchainCreateInfoKHR create_info = {
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .pNext = nullptr,
-        .flags = 0,
-        .surface = ctx->core.surface,
-        .minImageCount = ctx->swapchain.image_count,
-        .imageFormat = surface_fmt.format,
-        .imageColorSpace = surface_fmt.colorSpace,
-        .imageExtent = extent,
-        .imageArrayLayers = 1,                             // We dont need other
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // Bcuz we dont do things like
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = nullptr,
-        .preTransform = swapchain_details.capabilities.currentTransform,
-        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode = present_mode,
-        .clipped = VK_TRUE,
-        .oldSwapchain = VK_NULL_HANDLE, // For now assume only create 1 swapchain
-
-    };
-    candy_queue_family_indices indices =
-        candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
-    uint32_t queue_family_indicies[] = {indices.graphics_family, indices.present_family};
-
-    if (indices.graphics_family != indices.present_family) {
-        create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-        create_info.queueFamilyIndexCount = 2;
-        create_info.pQueueFamilyIndices = queue_family_indicies;
-    } else {
-        create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        create_info.queueFamilyIndexCount = 0;
-        create_info.pQueueFamilyIndices = nullptr;
-    }
-    VkResult result = vkCreateSwapchainKHR(ctx->core.logical_device, &create_info,
-                                           nullptr, &ctx->swapchain.handle);
-    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create swapchain");
-    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
-                            &ctx->swapchain.image_count, nullptr);
-    if (ctx->swapchain.image_count > 8) {
-        ctx->swapchain.image_count = 8;
-    }
-    vkGetSwapchainImagesKHR(ctx->core.logical_device, ctx->swapchain.handle,
-                            &ctx->swapchain.image_count, ctx->swapchain.images);
-    ctx->swapchain.image_format = surface_fmt.format;
-    ctx->swapchain.extent = extent;
-}
-
 // ============================================================================
 // PUBLIC API
 // ============================================================================
@@ -1552,7 +1422,7 @@ void candy_init(candy_context *ctx) {
     candy_init_surface(&ctx->core);
     candy_init_physical_device(&ctx->core);
     candy_init_logical_device(ctx);
-    candy_init_swapchain(ctx);
+    candy_create_swapchain(ctx);
     candy_init_imgui(ctx);
     candy_create_image_views(ctx);
     candy_create_render_pass(ctx);
@@ -1567,16 +1437,7 @@ void candy_init(candy_context *ctx) {
 
 void candy_cleanup(candy_context *ctx) {
 
-    for (uint32_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
-        vkDestroyFramebuffer(ctx->core.logical_device, ctx->swapchain.framebuffers[i],
-                             nullptr);
-    }
-
-    vkDestroySwapchainKHR(ctx->core.logical_device, ctx->swapchain.handle, nullptr);
-    for (uint32_t i = 0; i < ctx->swapchain.image_view_count; ++i) {
-        vkDestroyImageView(ctx->core.logical_device, ctx->swapchain.image_views[i],
-                           nullptr);
-    }
+    candy_destroy_swapchain(ctx);
 
     vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
     vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,

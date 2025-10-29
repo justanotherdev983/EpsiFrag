@@ -12,6 +12,8 @@ find_package(Vulkan REQUIRED)
 include_directories(${CMAKE_SOURCE_DIR}/libs)
 include_directories(${CMAKE_SOURCE_DIR}/libs/imgui) 
 include_directories(${CMAKE_SOURCE_DIR}/libs/imgui/backends) 
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
 
 file(GLOB_RECURSE SOURCES
     "src/*.cpp"

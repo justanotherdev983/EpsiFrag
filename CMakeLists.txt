@@ -10,9 +10,22 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Vulkan REQUIRED)
 include_directories(${CMAKE_SOURCE_DIR}/libs)
+include_directories(${CMAKE_SOURCE_DIR}/libs/imgui) 
+include_directories(${CMAKE_SOURCE_DIR}/libs/imgui/backends) 
 
 file(GLOB_RECURSE SOURCES
-        "src/*.cpp"
+    "src/*.cpp"
+)
+
+list(APPEND SOURCES
+    "${CMAKE_SOURCE_DIR}/libs/imgui/imgui.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/imgui/imgui_draw.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/imgui/imgui_widgets.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/imgui/backends/imgui_impl_glfw.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/imgui/backends/imgui_impl_vulkan.cpp"
+    "${CMAKE_SOURCE_DIR}/libs/imgui/imgui_tables.cpp"
+     "${CMAKE_SOURCE_DIR}/libs/imgui/imgui_demo.cpp"
+ 
 )
 
 add_executable(epsifrag ${SOURCES})

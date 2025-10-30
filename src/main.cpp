@@ -1,4 +1,5 @@
 #include "core.h"
+#include <GLFW/glfw3.h>
 #include <vulkan/vulkan_core.h>
 
 // ============================================================================
@@ -53,6 +54,13 @@ VkDebugUtilsMessengerCreateInfoEXT candy_make_debug_messenger_info() {
         .pfnUserCallback = candy_debug_callback,
         .pUserData = nullptr,
     };
+}
+
+static void candy_framebuffer_resize_callback(GLFWwindow *window, int width, int height) {
+    (void)width;
+    (void)height;
+    auto ctx = reinterpret_cast<candy_context *>(glfwGetWindowUserPointer(window));
+    ctx->swapchain.has_framebuffer_resized = true;
 }
 
 // ============================================================================
@@ -569,9 +577,6 @@ void candy_draw_frame(candy_context *ctx) {
                     VK_TRUE,
                     UINT32_MAX); // For DoD we need to make arra of fences and
                                  // use that instead of 1 here
-    vkResetFences(ctx->core.logical_device, 1,
-                  &ctx->frame_data.in_flight_fences[ctx->frame_data.current_frame]);
-
     uint32_t image_index;
 
     VkResult result_acq_img = vkAcquireNextImageKHR(
@@ -579,13 +584,18 @@ void candy_draw_frame(candy_context *ctx) {
         ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame],
         VK_NULL_HANDLE,
         &image_index); // dont know if this is correct
+
     if (result_acq_img == VK_ERROR_OUT_OF_DATE_KHR) {
+        ctx->swapchain.has_framebuffer_resized = true;
         candy_recreate_swapchain(ctx);
         return;
     } else {
         CANDY_ASSERT(result_acq_img == VK_SUCCESS || result_acq_img == VK_SUBOPTIMAL_KHR,
                      "Failed to acquire swapchain image");
     }
+    vkResetFences(ctx->core.logical_device, 1,
+                  &ctx->frame_data.in_flight_fences[ctx->frame_data.current_frame]);
+
     VkSemaphore wait_semaphores[] = {
         ctx->frame_data.image_available_semaphores[ctx->frame_data.current_frame]};
     VkSemaphore signal_semaphores[] = {
@@ -1151,6 +1161,15 @@ void candy_create_swapchain(candy_context *ctx) {
 }
 
 void candy_recreate_swapchain(candy_context *ctx) {
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(ctx->core.window, &width, &height);
+
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(ctx->core.window, &width, &height);
+        glfwWaitEvents();
+    }
+
     vkDeviceWaitIdle(ctx->core.logical_device);
     candy_destroy_swapchain(ctx);
     candy_create_swapchain(ctx);
@@ -1255,7 +1274,7 @@ uint32_t candy_pick_best_device(const candy_device_list *devices, VkSurfaceKHR s
 // ============================================================================
 
 void candy_destroy_swapchain(candy_context *ctx) {
-    for (size_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i) {
+    for (size_t i = 0; i < ctx->swapchain.image_count; ++i) {
         vkDestroyFramebuffer(ctx->core.logical_device, ctx->swapchain.framebuffers[i],
                              nullptr);
     }
@@ -1416,6 +1435,8 @@ void candy_init(candy_context *ctx) {
                                         ctx->config.window_title, nullptr, nullptr);
 
     CANDY_ASSERT(ctx->core.window != nullptr, "Failed to create window");
+    glfwSetWindowUserPointer(ctx->core.window, ctx);
+    glfwSetFramebufferSizeCallback(ctx->core.window, candy_framebuffer_resize_callback);
 
     // Init Vulkan
     candy_init_vulkan_instance(&ctx->core, &ctx->config);

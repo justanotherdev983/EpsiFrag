@@ -32,6 +32,6 @@ list(APPEND SOURCES
 
 add_executable(epsifrag ${SOURCES})
 
-target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES})
+target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} glm)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g3 ")

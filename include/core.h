@@ -15,6 +15,8 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
+
+#include <glm/glm.hpp>
 #include <vulkan/vulkan_core.h>
 
 // ============================================================================
@@ -103,6 +105,7 @@ struct candy_swapchain {
     VkImageView image_views[MAX_SWAPCHAIN_IMAGES];
     VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES];
     VkImage images[MAX_SWAPCHAIN_IMAGES];
+    bool has_framebuffer_resized = false;
 };
 
 struct candy_pipeline {

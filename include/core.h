@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <fstream>
@@ -91,6 +92,8 @@ struct candy_core {
     VkQueue present_queue;
     uint32_t graphics_queue_family;
     uint32_t present_queue_family;
+
+    VkBuffer vertex_buffer;
 };
 
 // This is "warm" data. This is all recreated together when the window is resized.
@@ -173,6 +176,39 @@ struct candy_swapchain_support_details {
     uint32_t present_mode_count;
 };
 
+struct candy_vertex {
+    glm::vec2 pos;
+    glm::vec3 color;
+
+    static VkVertexInputBindingDescription get_bindings_description() {
+
+        VkVertexInputBindingDescription binding_description {
+            .binding = 0,
+            .stride = sizeof(candy_vertex),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX}; // we wont use instanced rendering
+
+        return binding_description;
+    };
+
+    static std::array<VkVertexInputAttributeDescription, 2> get_attribute_description() {
+        std::array<VkVertexInputAttributeDescription, 2> attribute_description {};
+
+        attribute_description[0].binding = 0;
+        attribute_description[0].location = 0;
+        attribute_description[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attribute_description[0].offset = offsetof(candy_vertex, pos);
+
+        attribute_description[1].binding = 0;
+        attribute_description[1].location = 1;
+        attribute_description[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attribute_description[1].offset = offsetof(candy_vertex, color);
+
+        return attribute_description;
+    }
+};
+const std::vector<candy_vertex> vertices = {{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+                                            {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+                                            {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}};
 void candy_recreate_swapchain(candy_context *ctx);
 
 void candy_destroy_swapchain(candy_context *ctx);

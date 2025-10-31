@@ -104,6 +104,7 @@ void candy_create_imgui_descriptor_pool(candy_context *ctx) {
 
 void candy_create_imgui_render_pass(candy_context *ctx) {
     VkAttachmentDescription attachment = {
+        .flags = 0,
         .format = ctx->swapchain.image_format,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, // Load existing content
@@ -120,6 +121,7 @@ void candy_create_imgui_render_pass(candy_context *ctx) {
     };
 
     VkSubpassDescription subpass = {
+        .flags = 0,
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment,
@@ -132,10 +134,13 @@ void candy_create_imgui_render_pass(candy_context *ctx) {
         .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dependencyFlags = 0,
     };
 
     VkRenderPassCreateInfo info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .attachmentCount = 1,
         .pAttachments = &attachment,
         .subpassCount = 1,
@@ -279,9 +284,12 @@ void candy_imgui_render(candy_context *ctx, VkCommandBuffer cmd_buffer,
 
     VkRenderPassBeginInfo info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext = nullptr,
         .renderPass = ctx->imgui.render_pass,
         .framebuffer = ctx->swapchain.framebuffers[image_index],
         .renderArea.extent = ctx->swapchain.extent,
+        .clearValueCount = 0,
+        .pClearValues = nullptr,
     };
 
     vkCmdBeginRenderPass(cmd_buffer, &info, VK_SUBPASS_CONTENTS_INLINE);
@@ -752,6 +760,25 @@ VkShaderModule candy_create_shader_module(const std::vector<char> &shader_code,
     return shader_module;
 }
 
+void candy_create_vertex_buffer(candy_context *ctx) {
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = sizeof(vertices[0]) * vertices.size(),
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+
+    VkResult result = vkCreateBuffer(ctx->core.logical_device, &buffer_info, nullptr,
+                                     &ctx->core.vertex_buffer);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create vertex buffer");
+    return;
+}
+
 void candy_create_graphics_pipeline(candy_context *candy) {
     std::vector<char> vert_shader_code =
         candy_read_shader_file("../src/shaders/simple_shader.vert.spv");
@@ -813,15 +840,19 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         .pDynamicStates = dynamic_states.data(),
     };
 
+    auto bindings_description = candy_vertex::get_bindings_description();
+    auto attribute_description = candy_vertex::get_attribute_description();
+
     VkPipelineVertexInputStateCreateInfo vertex_input_info = {
         // We can in future use this for vars inside vertex shader
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = nullptr,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = nullptr,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bindings_description,
+        .vertexAttributeDescriptionCount =
+            static_cast<uint32_t>(attribute_description.size()),
+        .pVertexAttributeDescriptions = attribute_description.data(),
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -1450,6 +1481,7 @@ void candy_init(candy_context *ctx) {
     candy_create_graphics_pipeline(ctx);
     candy_create_framebuffers(ctx);
     candy_create_command_pools(ctx);
+    candy_create_vertex_buffer(ctx);
     candy_create_command_buffers(ctx);
     candy_create_sync_objs(ctx);
 
@@ -1459,6 +1491,8 @@ void candy_init(candy_context *ctx) {
 void candy_cleanup(candy_context *ctx) {
 
     candy_destroy_swapchain(ctx);
+
+    vkDestroyBuffer(ctx->core.logical_device, ctx->core.vertex_buffer, nullptr);
 
     vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
     vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,

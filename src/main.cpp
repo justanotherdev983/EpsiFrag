@@ -1,5 +1,7 @@
 #include "core.h"
 #include <GLFW/glfw3.h>
+#include <cstdint>
+#include <cstring>
 #include <vulkan/vulkan_core.h>
 
 // ============================================================================
@@ -527,6 +529,11 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index,
     };
     vkCmdSetScissor(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1, &scissor);
 
+    VkBuffer vertex_buffers[] = {ctx->core.vertex_buffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1,
+                           vertex_buffers, offsets);
+
     vkCmdDraw(ctx->frame_data.command_buffers[cmd_buf_indx], 3, 1, 0, 0);
     vkCmdEndRenderPass(ctx->frame_data.command_buffers[cmd_buf_indx]);
 
@@ -665,6 +672,23 @@ void candy_draw_frame(candy_context *ctx) {
 // GRAPHICS PIPELINE
 // ============================================================================
 
+uint32_t candy_find_memory_type(candy_context *ctx, uint32_t type_filter,
+                                VkMemoryPropertyFlags props) {
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(ctx->core.physical_device, &mem_props);
+
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+        if (type_filter & (1 << i) &&
+            (mem_props.memoryTypes[i].propertyFlags & props) == props) {
+            return i;
+        }
+    }
+
+    CANDY_ASSERT(false, "Failed to find suitable memory");
+
+    return UINT32_MAX;
+}
+
 void candy_create_render_pass(candy_context *ctx) {
     VkAttachmentDescription color_attachment = {
         .flags = 0,
@@ -776,6 +800,34 @@ void candy_create_vertex_buffer(candy_context *ctx) {
     VkResult result = vkCreateBuffer(ctx->core.logical_device, &buffer_info, nullptr,
                                      &ctx->core.vertex_buffer);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create vertex buffer");
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(ctx->core.logical_device, ctx->core.vertex_buffer,
+                                  &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = candy_find_memory_type(
+            ctx, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    VkResult result_alloc_mem = vkAllocateMemory(
+        ctx->core.logical_device, &alloc_info, nullptr, &ctx->core.vertex_buffer_memory);
+
+    CANDY_ASSERT(result_alloc_mem == VK_SUCCESS, "Failed to allocate memory");
+
+    vkBindBufferMemory(ctx->core.logical_device, ctx->core.vertex_buffer,
+                       ctx->core.vertex_buffer_memory, 0);
+
+    void *data;
+    vkMapMemory(ctx->core.logical_device, ctx->core.vertex_buffer_memory, 0,
+                buffer_info.size, 0, &data);
+    memcpy(data, vertices.data(), buffer_info.size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->core.vertex_buffer_memory);
+
     return;
 }
 
@@ -1489,20 +1541,19 @@ void candy_init(candy_context *ctx) {
 }
 
 void candy_cleanup(candy_context *ctx) {
+    vkDeviceWaitIdle(ctx->core.logical_device);
 
     candy_destroy_swapchain(ctx);
 
-    vkDestroyBuffer(ctx->core.logical_device, ctx->core.vertex_buffer, nullptr);
-
-    vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
-    vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,
-                            nullptr);
+    candy_cleanup_imgui(ctx);
 
     vkDestroyPipeline(ctx->core.logical_device, ctx->pipeline.graphics_pipeline, nullptr);
-    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
-        vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pools[i],
-                             nullptr);
-    }
+    vkDestroyPipelineLayout(ctx->core.logical_device, ctx->pipeline.pipeline_layout,
+                            nullptr);
+    vkDestroyRenderPass(ctx->core.logical_device, ctx->pipeline.render_pass, nullptr);
+
+    vkDestroyBuffer(ctx->core.logical_device, ctx->core.vertex_buffer, nullptr);
+    vkFreeMemory(ctx->core.logical_device, ctx->core.vertex_buffer_memory, nullptr);
 
     for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
         vkDestroySemaphore(ctx->core.logical_device,
@@ -1513,7 +1564,10 @@ void candy_cleanup(candy_context *ctx) {
                        nullptr);
     }
 
-    candy_cleanup_imgui(ctx);
+    for (uint32_t i = 0; i < MAX_FRAME_IN_FLIGHT; ++i) {
+        vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pools[i],
+                             nullptr);
+    }
 
     vkDestroyDevice(ctx->core.logical_device, nullptr);
 
@@ -1521,6 +1575,7 @@ void candy_cleanup(candy_context *ctx) {
         candy_destroy_debug_messenger(ctx->core.instance, ctx->core.debug_messenger);
     }
     vkDestroySurfaceKHR(ctx->core.instance, ctx->core.surface, nullptr);
+
     vkDestroyInstance(ctx->core.instance, nullptr);
 
     glfwDestroyWindow(ctx->core.window);

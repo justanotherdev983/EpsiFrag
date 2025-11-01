@@ -94,6 +94,7 @@ struct candy_core {
     uint32_t present_queue_family;
 
     VkBuffer vertex_buffer;
+    VkDeviceMemory vertex_buffer_memory;
 };
 
 // This is "warm" data. This is all recreated together when the window is resized.

@@ -14,7 +14,6 @@ include_directories(${CMAKE_SOURCE_DIR}/libs/imgui)
 include_directories(${CMAKE_SOURCE_DIR}/libs/imgui/backends) 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
-
 file(GLOB_RECURSE SOURCES
     "src/*.cpp"
 )
@@ -32,6 +31,6 @@ list(APPEND SOURCES
 
 add_executable(epsifrag ${SOURCES})
 
-target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} glm)
+target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g3 ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g3")

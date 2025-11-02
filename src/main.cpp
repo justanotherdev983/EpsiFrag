@@ -2,8 +2,11 @@
 #include "core.h"
 
 #include <GLFW/glfw3.h>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <dlfcn.h>
+#include <sys/stat.h>
 #include <vulkan/vulkan_core.h>
 
 // ============================================================================
@@ -117,26 +120,204 @@ void candy_get_required_extensions(const char **out_extensions, uint32_t *out_co
 // ============================================================================
 // HOT RELOADING
 // ============================================================================
-void candy_check_hot_reload(candy_context *ctx) {
-    if (!ctx->config.enable_hot_reloading) {
-        return;
-    }
-    return;
-}
 
 void candy_reload_code(candy_context *ctx) {
 #ifdef _WIN32
     CANDY_ASSERT(false, "Win is not implemented");
 #endif // _WIN32
 
-    int dl_result = dlclose(ctx->game_module.dll_handle);
-    CANDY_ASSERT(dl_result, "Failed to close dll handle");
+    if (ctx->game_module.dll_handle) {
+        int dl_result = dlclose(ctx->game_module.dll_handle);
+        CANDY_ASSERT(dl_result == 0, "Failed to close dll handle");
+        ctx->game_module.dll_handle = nullptr;
+    }
+
+    // TODO: Implement lock file syste, for this instead time buffer
+    usleep(100000); // 100ms
+
+    const char *dll_path = "output/libgame.so";
+
+    struct stat file_stat;
+    if (stat(dll_path, &file_stat) != 0) {
+        std::cerr << "[CANDY ERROR] Cannot access file for reload: " << dll_path
+                  << std::endl;
+        std::cerr << "              errno: " << strerror(errno) << std::endl;
+        return;
+    }
+
+    ctx->game_module.dll_handle = dlopen(dll_path, RTLD_NOW | RTLD_LOCAL);
+
+    if (ctx->game_module.dll_handle == nullptr) {
+        const char *error = dlerror();
+        std::cerr << "[CANDY ERROR] Failed to reload game module: " << dll_path
+                  << std::endl;
+        std::cerr << "              dlopen error: " << (error ? error : "unknown")
+                  << std::endl;
+        return;
+    }
+
+    dlerror();
+
+    ctx->game_module.api.init = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_init");
+    ctx->game_module.api.update = (void (*)(candy_context *, void *, uint32_t))dlsym(
+        ctx->game_module.dll_handle, "game_update");
+    ctx->game_module.api.render = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_render");
+    ctx->game_module.api.cleanup = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_cleanup");
+    ctx->game_module.api.on_reload =
+        (void (*)(void *, void *))dlsym(ctx->game_module.dll_handle, "game_on_reload");
+
+    size_t *state_size_ptr =
+        (size_t *)dlsym(ctx->game_module.dll_handle, "game_state_size");
+    if (state_size_ptr) {
+        ctx->game_module.api.state_size = *state_size_ptr;
+    }
+
+    const char *dlsym_error = dlerror();
+    if (dlsym_error != nullptr) {
+        std::cerr << "[CANDY ERROR] Failed to load dll symbols: " << dlsym_error
+                  << std::endl;
+        return;
+    }
 
     void *new_state = malloc(ctx->game_module.api.state_size);
+    if (!new_state) {
+        std::cerr << "[CANDY ERROR] Failed to allocate new game state" << std::endl;
+        return;
+    }
 
-    dlopen();
+    if (ctx->game_module.api.on_reload && ctx->game_module.game_state) {
+        ctx->game_module.api.on_reload(ctx->game_module.game_state, new_state);
+    } else if (ctx->game_module.api.init) {
+        ctx->game_module.api.init(ctx, new_state);
+    }
+
+    if (ctx->game_module.game_state) {
+        free(ctx->game_module.game_state);
+    }
+    ctx->game_module.game_state = new_state;
 
     return;
+}
+
+void candy_check_hot_reload(candy_context *ctx) {
+    if (!ctx->config.enable_hot_reloading) {
+        return;
+    }
+
+    struct stat file_stat;
+    const char *dll_path = "output/libgame.so";
+
+    if (stat(dll_path, &file_stat) != 0) {
+        // File doesn't exist or can't be accessed
+        return;
+    }
+
+    if (file_stat.st_mtime > ctx->game_module.last_write_time) {
+        std::cout << "[CANDY] Detected game module change, reloading..." << std::endl;
+        ctx->game_module.last_write_time = file_stat.st_mtime;
+
+        candy_reload_code(ctx);
+
+        // Only increment if reload succeeded
+        if (ctx->game_module.dll_handle) {
+            ctx->game_module.reload_count++;
+            std::cout << "[CANDY] Hot reload complete (reload #"
+                      << ctx->game_module.reload_count << ")" << std::endl;
+        } else {
+            std::cerr << "[CANDY] Hot reload failed!" << std::endl;
+        }
+    }
+
+    return;
+}
+
+void candy_cleanup_hot_reloading(candy_context *ctx) {
+
+    if (ctx->game_module.api.cleanup) {
+        ctx->game_module.api.cleanup(ctx, ctx->game_module.game_state);
+    }
+
+    if (ctx->game_module.game_state) {
+        free(ctx->game_module.game_state);
+    }
+
+    if (ctx->game_module.dll_handle) {
+        dlclose(ctx->game_module.dll_handle);
+    }
+
+    return;
+}
+
+void candy_init_game_module(candy_context *ctx) {
+    if (!ctx->config.enable_hot_reloading) {
+        std::cout << "[CANDY] Hot reloading disabled, skipping game module" << std::endl;
+        return;
+    }
+    const char *dll_path = "output/libgame.so";
+    struct stat file_stat;
+    if (stat(dll_path, &file_stat) == 0) {
+        ctx->game_module.last_write_time = file_stat.st_mtime;
+    } else {
+        std::cerr << "[CANDY ERROR] Cannot stat file: " << dll_path << std::endl;
+        std::cerr << "              errno: " << strerror(errno) << std::endl;
+    }
+    ctx->game_module.dll_handle = dlopen(dll_path, RTLD_NOW);
+    if (ctx->game_module.dll_handle == nullptr) {
+        const char *error = dlerror();
+        std::cerr << "[CANDY ERROR] Failed to load game module: " << dll_path
+                  << std::endl;
+        std::cerr << "              dlopen error: " << (error ? error : "unknown")
+                  << std::endl;
+        std::cerr << "              Current working directory: ";
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            std::cerr << cwd << std::endl;
+        }
+    }
+    CANDY_ASSERT(ctx->game_module.dll_handle != nullptr, "Failed to load game module");
+    dlerror();
+
+    ctx->game_module.api.init = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_init");
+    ctx->game_module.api.update = (void (*)(candy_context *, void *, uint32_t))dlsym(
+        ctx->game_module.dll_handle, "game_update");
+    ctx->game_module.api.render = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_render");
+    ctx->game_module.api.cleanup = (void (*)(candy_context *, void *))dlsym(
+        ctx->game_module.dll_handle, "game_cleanup");
+    ctx->game_module.api.on_reload =
+        (void (*)(void *, void *))dlsym(ctx->game_module.dll_handle, "game_on_reload");
+
+    size_t *state_size_ptr =
+        (size_t *)dlsym(ctx->game_module.dll_handle, "game_state_size");
+    if (state_size_ptr) {
+        ctx->game_module.api.state_size = *state_size_ptr;
+    } else {
+        std::cerr << "[CANDY ERROR] Failed to load game_state_size symbol" << std::endl;
+        ctx->game_module.api.state_size = 0;
+    }
+
+    const char *dlsym_error = dlerror();
+    if (dlsym_error != nullptr) {
+        std::cerr << "[CANDY ERROR] Failed to load dll symbols: " << dlsym_error
+                  << std::endl;
+        return;
+    }
+
+    std::cout << "[CANDY] Game state size: " << ctx->game_module.api.state_size
+              << " bytes" << std::endl;
+
+    ctx->game_module.game_state = malloc(ctx->game_module.api.state_size);
+    CANDY_ASSERT(ctx->game_module.game_state != nullptr, "Failed to allocate game state");
+
+    if (ctx->game_module.api.init) {
+        ctx->game_module.api.init(ctx, ctx->game_module.game_state);
+    }
+    ctx->game_module.reload_count = 0;
+    std::cout << "[CANDY] Game module loaded successfully" << std::endl;
 }
 
 // ============================================================================
@@ -1283,6 +1464,7 @@ void candy_init(candy_context *ctx) {
         .width = 800,
         .height = 600,
         .enable_validation = ENABLE_VALIDATION,
+        .enable_hot_reloading = true,
         .app_name = "Candy Renderer",
         .window_title = "Candy Window",
     };
@@ -1314,6 +1496,8 @@ void candy_init(candy_context *ctx) {
     candy_create_vertex_buffer(ctx);
     candy_create_command_buffers(ctx);
     candy_create_sync_objs(ctx);
+
+    candy_init_game_module(ctx);
 
     std::cout << "[CANDY] Init complete\n";
 }
@@ -1364,9 +1548,25 @@ void candy_cleanup(candy_context *ctx) {
 
 void candy_loop(candy_context *ctx) {
 
+    double last_time = glfwGetTime();
+
     while (!glfwWindowShouldClose(ctx->core.window)) {
         glfwPollEvents();
+
+        candy_check_hot_reload(ctx);
+        double curr_time = glfwGetTime();
+        double delta_time = (curr_time - last_time) * 1000.0;
+
+        last_time = curr_time;
+
+        if (ctx->game_module.api.update) {
+            ctx->game_module.api.update(ctx, ctx->game_module.game_state, delta_time);
+        }
+
         candy_draw_frame(ctx);
+        if (ctx->game_module.api.render) {
+            ctx->game_module.api.render(ctx, ctx->game_module.game_state);
+        }
     }
     vkDeviceWaitIdle(ctx->core.logical_device);
 

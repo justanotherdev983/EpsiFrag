@@ -5,10 +5,13 @@
 #include <cassert>
 #include <cstdint>
 #include <dlfcn.h>
+#include <errno.h>
 #include <fstream>
 #include <iostream>
 #include <ostream>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector> // For reading our shader files
 
 #define GLFW_INCLUDE_VULKAN

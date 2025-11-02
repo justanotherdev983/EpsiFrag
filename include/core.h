@@ -4,6 +4,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <dlfcn.h>
 #include <fstream>
 #include <iostream>
 #include <ostream>
@@ -27,7 +28,10 @@
 #define CANDY_ASSERT(condition, message)                                                 \
     do {                                                                                 \
         if (!(condition)) {                                                              \
-            std::cerr << "[CANDY ASSERT FAILED] " << message << std::endl;               \
+            std::cerr << "[CANDY ASSERT FAILED] " << message << std::endl                \
+                      << "at function: " << __FUNCTION__ << std::endl                    \
+                      << "in file: " << __FILE__ << std::endl                            \
+                      << "at line: " << __LINE__ << std::endl;                           \
             assert(condition);                                                           \
         }                                                                                \
     } while (0)
@@ -56,6 +60,12 @@ constexpr bool ENABLE_VALIDATION = true;
 #endif
 
 // ============================================================================
+//  FORWARD DECLARATIONS
+// ============================================================================
+
+struct candy_context;
+
+// ============================================================================
 // CANDY DATA STRUCTURES
 // ============================================================================
 
@@ -64,6 +74,7 @@ struct candy_config {
     uint32_t width;
     uint32_t height;
     bool enable_validation;
+    bool enable_hot_reloading;
     const char *app_name;
     const char *window_title;
 };
@@ -134,6 +145,24 @@ struct candy_imgui {
     float menu_alpha;
 };
 
+struct candy_game_api {
+    void (*init)(candy_context *ctx, void *game_state);
+    void (*update)(candy_context *ctx, void *game_state, uint32_t delta_time);
+    void (*render)(candy_context *ctx, void *game_state);
+    void (*cleanup)(candy_context *ctx, void *game_state);
+
+    void (*on_reload)(void *old_state, void *new_state);
+    size_t state_size;
+};
+
+struct candy_game_module {
+    void *dll_handle;
+    candy_game_api api;
+    void *game_state;
+
+    time_t last_write_time;
+    uint32_t reload_count;
+};
 // Main candy context
 struct candy_context {
     // --- ImGui ---
@@ -151,6 +180,9 @@ struct candy_context {
 
     // --- Hot Data ---
     candy_frame_data frame_data;
+
+    // --- Hot reload ---
+    candy_game_module game_module;
 };
 
 // Helper for device selection

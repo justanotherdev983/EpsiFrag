@@ -10,28 +10,7 @@ A simple multiplayer concept from scratch with vulkan SDK
 
 ## Building
 
-### 1. Setup Vulkan SDK Environment
-
-Before building, you need to set up the Vulkan SDK environment variables:
-
-```bash
-export VULKAN_SDK=$HOME/code/git/EpsiFrag/libs/vulkansdk/1.4.321.1/x86_64
-export VK_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d
-export LD_LIBRARY_PATH=$VULKAN_SDK/lib:$LD_LIBRARY_PATH
-export PATH=$VULKAN_SDK/bin:$PATH
-```
-
-**To make these permanent**, add them to your `~/.bashrc` or `~/.zshrc`:
-
-```bash
-echo 'export VULKAN_SDK=$HOME/code/git/EpsiFrag/libs/vulkansdk/1.4.321.1/x86_64' >> ~/.bashrc
-echo 'export VK_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=$VULKAN_SDK/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
-echo 'export PATH=$VULKAN_SDK/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 2. Compile Shaders
+### 1. Compile Shaders
 
 ```bash
 cd src/shaders
@@ -39,7 +18,7 @@ cd src/shaders
 cd ../..
 ```
 
-### 3. Build the Project
+### 2. Build the Project
 
 ```bash
 mkdir -p build
@@ -48,7 +27,7 @@ cmake ..
 make
 ```
 
-### 4. Run
+### 3. Run
 
 ```bash
 ./epsifrag
@@ -113,4 +92,3 @@ EpsiFrag/
 ```bash
 cloc --exclude-dir=build,libs .
 ```
-

@@ -92,11 +92,9 @@ void candy_create_imgui_render_pass(candy_context *ctx) {
 }
 
 void candy_init_imgui(candy_context *ctx) {
-    // Create descriptor pool for ImGui
     candy_create_imgui_descriptor_pool(ctx);
     candy_create_imgui_render_pass(ctx);
 
-    // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
@@ -105,10 +103,26 @@ void candy_init_imgui(candy_context *ctx) {
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
 
-    // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForVulkan(ctx->core.window, true);
 
-    // Load Vulkan functions - CRITICAL!
+    int window_width, window_height;
+    int framebuffer_width, framebuffer_height;
+    glfwGetWindowSize(ctx->core.window, &window_width, &window_height);
+    glfwGetFramebufferSize(ctx->core.window, &framebuffer_width, &framebuffer_height);
+
+    float scale_x = (float)framebuffer_width / (float)window_width;
+    float scale_y = (float)framebuffer_height / (float)window_height;
+
+    io.DisplaySize = ImVec2((float)window_width, (float)window_height);
+    io.DisplayFramebufferScale = ImVec2(scale_x, scale_y);
+
+    std::cout << "[CANDY IMGUI] Window size: " << window_width << "x" << window_height
+              << std::endl;
+    std::cout << "[CANDY IMGUI] Framebuffer size: " << framebuffer_width << "x"
+              << framebuffer_height << std::endl;
+    std::cout << "[CANDY IMGUI] Scale: " << scale_x << "x" << scale_y << std::endl;
+
+    // Load Vulkan functions
     ImGui_ImplVulkan_LoadFunctions(
         VK_API_VERSION_1_0,
         [](const char *function_name, void *user_data) -> PFN_vkVoidFunction {
@@ -142,7 +156,21 @@ void candy_init_imgui(candy_context *ctx) {
 }
 
 void candy_imgui_new_frame(candy_context *ctx) {
-    (void)ctx;
+    ImGuiIO &io = ImGui::GetIO();
+
+    int window_width, window_height;
+    int framebuffer_width, framebuffer_height;
+    glfwGetWindowSize(ctx->core.window, &window_width, &window_height);
+    glfwGetFramebufferSize(ctx->core.window, &framebuffer_width, &framebuffer_height);
+
+    float scale_x =
+        (window_width > 0) ? ((float)framebuffer_width / (float)window_width) : 1.0f;
+    float scale_y =
+        (window_height > 0) ? ((float)framebuffer_height / (float)window_height) : 1.0f;
+
+    io.DisplaySize = ImVec2((float)window_width, (float)window_height);
+    io.DisplayFramebufferScale = ImVec2(scale_x, scale_y);
+
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -153,7 +181,7 @@ void candy_imgui_render_menu(candy_context *ctx) {
         return;
 
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(400, 500), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(ctx->imgui.menu_alpha);
 
     if (ImGui::Begin("Candy Game Menu", &ctx->imgui.show_menu)) {
@@ -163,6 +191,12 @@ void candy_imgui_render_menu(candy_context *ctx) {
         ImGui::Text("Rendering:");
         ImGui::Text("  FPS: %.1f", ImGui::GetIO().Framerate);
         ImGui::Text("  Frame Time: %.3f ms", 1000.0f / ImGui::GetIO().Framerate);
+
+        // Display debug info
+        ImGuiIO &io = ImGui::GetIO();
+        ImGui::Text("  Display: %.0fx%.0f", io.DisplaySize.x, io.DisplaySize.y);
+        ImGui::Text("  Scale: %.2fx%.2f", io.DisplayFramebufferScale.x,
+                    io.DisplayFramebufferScale.y);
 
         ImGui::Separator();
 

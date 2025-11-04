@@ -26,7 +26,9 @@ set(IMGUI_SOURCES
 
 # Engine sources (exclude game.cpp if it exists)
 file(GLOB_RECURSE ENGINE_SOURCES "src/*.cpp")
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*game\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*quant\\.cpp$")
+#list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*game\\.cpp$")
+
 
 # Main executable with ImGui
 add_executable(epsifrag ${ENGINE_SOURCES} ${IMGUI_SOURCES})
@@ -38,7 +40,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # Game module as shared library
-add_library(game SHARED src/game.cpp)
+add_library(game SHARED src/quant.cpp)
+# add_library(game SHARED src/game.cpp)
 target_link_libraries(game glfw ${Vulkan_LIBRARIES})
 set_target_properties(game PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/output"

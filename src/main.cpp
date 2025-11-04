@@ -576,7 +576,7 @@ void candy_draw_frame(candy_context *ctx) {
         ctx->frame_data.render_finished_semaphores[ctx->frame_data.current_frame]};
     VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
 
-    candy_imgui_new_frame(ctx);
+    // candy_imgui_new_frame(ctx);
 
     vkResetCommandBuffer(ctx->frame_data.command_buffers[ctx->frame_data.current_frame],
                          0);
@@ -1461,8 +1461,8 @@ void candy_init_logical_device(candy_context *ctx) {
 
 void candy_init(candy_context *ctx) {
     ctx->config = {
-        .width = 800,
-        .height = 600,
+        .width = 1920,
+        .height = 1080,
         .enable_validation = ENABLE_VALIDATION,
         .enable_hot_reloading = true,
         .app_name = "Candy Renderer",
@@ -1472,7 +1472,7 @@ void candy_init(candy_context *ctx) {
     // Init GLFW
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     ctx->core.window = glfwCreateWindow(ctx->config.width, ctx->config.height,
                                         ctx->config.window_title, nullptr, nullptr);
@@ -1556,17 +1556,18 @@ void candy_loop(candy_context *ctx) {
         candy_check_hot_reload(ctx);
         double curr_time = glfwGetTime();
         double delta_time = (curr_time - last_time) * 1000.0;
-
         last_time = curr_time;
+
+        candy_imgui_new_frame(ctx);
 
         if (ctx->game_module.api.update) {
             ctx->game_module.api.update(ctx, ctx->game_module.game_state, delta_time);
         }
-
-        candy_draw_frame(ctx);
         if (ctx->game_module.api.render) {
             ctx->game_module.api.render(ctx, ctx->game_module.game_state);
         }
+
+        candy_draw_frame(ctx);
     }
     vkDeviceWaitIdle(ctx->core.logical_device);
 

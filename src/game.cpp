@@ -88,7 +88,7 @@ void game_on_reload(void *old_state, void *new_state) {
 
     memcpy(new_game, old_game, sizeof(game_state));
 
-    uint32_t version = 7;
+    uint32_t version = 8;
     std::cout << "Game version: " << version << std::endl;
     std::cout.flush();
 

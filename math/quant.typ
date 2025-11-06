@@ -179,7 +179,22 @@ This method is fast, accurate, and perfect for GPU implementation!
 - Compute the potential factor:
   $ P(bold(r)) = exp(-i V(bold(r)) Delta t) $
   (if $V$ doesn't change in time)
+- Initialize guassian wavepacket (can use something else if wanted):
+$ psi(bold(r), t=0) = A exp(-((x-x_0)^2 + (y-y_0)^2 + (z-z_0)^2)/(4sigma^2) + i bold(k)_0 dot.c bold(r)) $
 
+*Meaning*
+1. *Position part* (real Gaussian):
+  $ exp(-r^2/(4sigma^2)) $
+  - Centers the particle at position $(x_0, y_0, z_0)$
+  - $sigma$ = width parameter (how spread out it is)
+
+2. *Momentum part* (plane wave):
+  $ exp(i bold(k)_0 dot.c bold(r)) = exp(i(k_(0x)x + k_(0y)y + k_(0z)z)) $
+  - Gives the particle initial momentum
+  - $bold(k)_0 = (k_(0x), k_(0y), k_(0z))$ = initial wave vector
+
+3. *Normalization constant*:
+  $ A = (pi sigma^2)^(-3\/4) $
 == On Update 
 
 *First half kinetic step (in Fourier space):*

@@ -7,11 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Vulkan REQUIRED)
+find_package(glslang REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR}/libs)
 include_directories(${CMAKE_SOURCE_DIR}/libs/imgui) 
 include_directories(${CMAKE_SOURCE_DIR}/libs/imgui/backends) 
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${glslang_INCLUDE_DIRS})
 
 # ImGui sources
 set(IMGUI_SOURCES
@@ -32,7 +34,7 @@ list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*quant\\.cpp$")
 
 # Main executable with ImGui
 add_executable(epsifrag ${ENGINE_SOURCES} ${IMGUI_SOURCES})
-target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} dl)
+target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} dl glslang SPIRV)
 
 # Export symbols from the executable for hot-reloaded game module
 if(UNIX AND NOT APPLE)

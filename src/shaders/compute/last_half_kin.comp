@@ -1,6 +1,6 @@
 #version 450
 
-layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 
 layout(set = 0, binding = 0) buffer PsiFreq {
     vec2 psi_freq[]; // complex numbers stored as vec2 (real, imag)
@@ -30,5 +30,4 @@ void main() {
 
     uint idx = i + pc.nx * (j + pc.ny * k);
     psi_freq[idx] = complex_mul(psi_freq[idx], kinetic_factor[idx]);
-
 }

@@ -20,6 +20,7 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
+#include "vkFFT.h"
 
 #include <glm/glm.hpp>
 #include <vulkan/vulkan_core.h>
@@ -148,6 +149,16 @@ struct candy_imgui {
     float menu_alpha;
 };
 
+// Compute pipeline structures
+struct candy_compute_pipeline {
+    VkDescriptorSetLayout descriptor_layout;
+    VkDescriptorPool descriptor_pool;
+    VkPipelineLayout pipeline_layouts[4];
+    VkPipeline pipelines[4]; // first_half_kin, full_potential, last_half_kin, visualize
+    VkCommandPool command_pool;
+    VkCommandBuffer command_buffer;
+};
+
 struct candy_game_api {
     void (*init)(candy_context *ctx, void *game_state);
     void (*update)(candy_context *ctx, void *game_state, uint32_t delta_time);
@@ -180,6 +191,7 @@ struct candy_context {
     // --- Rendering Pipeline (recreated if swapchain changes format) ---
     candy_swapchain swapchain;
     candy_pipeline pipeline;
+    candy_compute_pipeline compute;
 
     // --- Hot Data ---
     candy_frame_data frame_data;
@@ -248,3 +260,6 @@ const std::vector<candy_vertex> vertices = {{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
 void candy_recreate_swapchain(candy_context *ctx);
 
 void candy_destroy_swapchain(candy_context *ctx);
+candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
+                                                     VkSurfaceKHR surface);
+static std::vector<char> candy_read_shader_file(const std::string &filename);

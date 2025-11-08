@@ -116,6 +116,192 @@ void candy_get_required_extensions(const char **out_extensions, uint32_t *out_co
         out_extensions[(*out_count)++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     }
 }
+// ============================================================================
+// COMPUTE SHADERS
+// ============================================================================
+
+VkShaderModule candy_create_compute_shader_module(VkDevice device, const char *filepath) {
+    std::vector<char> code = candy_read_shader_file(filepath);
+
+    VkShaderModuleCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .codeSize = code.size(),
+        .pCode = reinterpret_cast<const uint32_t *>(code.data()),
+    };
+
+    VkShaderModule shader_module;
+    VkResult result = vkCreateShaderModule(device, &create_info, nullptr, &shader_module);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute shader module");
+
+    return shader_module;
+}
+
+void candy_create_compute_descriptor_layout(candy_context *ctx) {
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        },
+    };
+
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .bindingCount = 2,
+        .pBindings = bindings,
+    };
+
+    VkResult result = vkCreateDescriptorSetLayout(
+        ctx->core.logical_device, &layout_info, nullptr, &ctx->compute.descriptor_layout);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute descriptor layout");
+}
+
+void candy_create_compute_descriptor_pool(candy_context *ctx) {
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 8, // 2 bindings * 4 shaders
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .maxSets = 4,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    };
+
+    VkResult result = vkCreateDescriptorPool(ctx->core.logical_device, &pool_info,
+                                             nullptr, &ctx->compute.descriptor_pool);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute descriptor pool");
+}
+
+void candy_create_compute_pipelines(candy_context *ctx) {
+    VkPushConstantRange push_constant = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = sizeof(uint32_t) * 3, // nx, ny, nz
+    };
+
+    const char *shader_paths[4] = {
+        "../src/shaders/first_half_kin.comp.spv",
+        "../src/shaders/full_potential.comp.spv",
+        "../src/shaders/last_half_kin.comp.spv",
+        "../src/shaders/visualize.comp.spv",
+    };
+
+    for (int i = 0; i < 4; ++i) {
+        VkPipelineLayoutCreateInfo layout_info = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 1,
+            .pSetLayouts = &ctx->compute.descriptor_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_constant,
+        };
+
+        VkResult result =
+            vkCreatePipelineLayout(ctx->core.logical_device, &layout_info, nullptr,
+                                   &ctx->compute.pipeline_layouts[i]);
+        CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute pipeline layout");
+
+        VkShaderModule shader =
+            candy_create_compute_shader_module(ctx->core.logical_device, shader_paths[i]);
+
+        VkPipelineShaderStageCreateInfo shader_stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = shader,
+            .pName = "main",
+            .pSpecializationInfo = nullptr,
+        };
+
+        VkComputePipelineCreateInfo pipeline_info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = shader_stage,
+            .layout = ctx->compute.pipeline_layouts[i],
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex = -1,
+        };
+
+        VkResult pipeline_result =
+            vkCreateComputePipelines(ctx->core.logical_device, VK_NULL_HANDLE, 1,
+                                     &pipeline_info, nullptr, &ctx->compute.pipelines[i]);
+        CANDY_ASSERT(pipeline_result == VK_SUCCESS, "Failed to create compute pipeline");
+
+        vkDestroyShaderModule(ctx->core.logical_device, shader, nullptr);
+    }
+}
+
+void candy_create_compute_command_pool(candy_context *ctx) {
+    candy_queue_family_indices indices =
+        candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
+
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = indices.graphics_family, // Can use compute queue if available
+    };
+
+    VkResult result = vkCreateCommandPool(ctx->core.logical_device, &pool_info, nullptr,
+                                          &ctx->compute.command_pool);
+    CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute command pool");
+
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = ctx->compute.command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+
+    VkResult cmd_result = vkAllocateCommandBuffers(ctx->core.logical_device, &alloc_info,
+                                                   &ctx->compute.command_buffer);
+    CANDY_ASSERT(cmd_result == VK_SUCCESS, "Failed to allocate compute command buffer");
+}
+
+void candy_init_compute_pipeline(candy_context *ctx) {
+    candy_create_compute_descriptor_layout(ctx);
+    candy_create_compute_descriptor_pool(ctx);
+    candy_create_compute_pipelines(ctx);
+    candy_create_compute_command_pool(ctx);
+
+    std::cout << "[CANDY] Compute pipeline initialized\n";
+}
+
+void candy_cleanup_compute_pipeline(candy_context *ctx) {
+    vkDestroyCommandPool(ctx->core.logical_device, ctx->compute.command_pool, nullptr);
+
+    for (int i = 0; i < 4; ++i) {
+        vkDestroyPipeline(ctx->core.logical_device, ctx->compute.pipelines[i], nullptr);
+        vkDestroyPipelineLayout(ctx->core.logical_device,
+                                ctx->compute.pipeline_layouts[i], nullptr);
+    }
+
+    vkDestroyDescriptorPool(ctx->core.logical_device, ctx->compute.descriptor_pool,
+                            nullptr);
+    vkDestroyDescriptorSetLayout(ctx->core.logical_device, ctx->compute.descriptor_layout,
+                                 nullptr);
+}
 
 // ============================================================================
 // HOT RELOADING
@@ -1496,6 +1682,7 @@ void candy_init(candy_context *ctx) {
     candy_create_vertex_buffer(ctx);
     candy_create_command_buffers(ctx);
     candy_create_sync_objs(ctx);
+    candy_init_compute_pipeline(ctx);
 
     candy_init_game_module(ctx);
 
@@ -1530,6 +1717,8 @@ void candy_cleanup(candy_context *ctx) {
         vkDestroyCommandPool(ctx->core.logical_device, ctx->frame_data.command_pools[i],
                              nullptr);
     }
+
+    candy_cleanup_compute_pipeline(ctx);
 
     vkDestroyDevice(ctx->core.logical_device, nullptr);
 

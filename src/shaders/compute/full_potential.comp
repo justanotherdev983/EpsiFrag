@@ -1,13 +1,13 @@
 #version 450
 
-layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 
 layout(set = 0, binding = 0) buffer PsiFreq {
     vec2 psi_freq[]; // complex numbers stored as vec2 (real, imag)
 };
 
-layout(set = 0, binding = 1) buffer KineticFactor {
-    vec2 kinetic_factor[];
+layout(set = 0, binding = 1) buffer PotentialFactort {
+    vec2 potential_factor[];
 };
 
 layout(push_constant) uniform PushConstants {
@@ -29,6 +29,5 @@ void main() {
     uint k = gl_GlobalInvocationID.z;
 
     uint idx = i + pc.nx * (j + pc.ny * k);
-    psi_freq[idx] = complex_mul(psi_freq[idx], kinetic_factor[idx]);
-
+    psi_freq[idx] = complex_mul(psi_freq[idx], potential_factor[idx]);
 }

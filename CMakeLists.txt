@@ -34,7 +34,7 @@ list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*quant\\.cpp$")
 
 # Main executable with ImGui
 add_executable(epsifrag ${ENGINE_SOURCES} ${IMGUI_SOURCES})
-target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} dl glslang SPIRV)
+target_link_libraries(epsifrag glfw ${Vulkan_LIBRARIES} dl glslang SPIRV SPIRV-Tools-opt SPIRV-Tools)
 
 # Export symbols from the executable for hot-reloaded game module
 if(UNIX AND NOT APPLE)

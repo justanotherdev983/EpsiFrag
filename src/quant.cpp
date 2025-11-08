@@ -47,28 +47,27 @@ struct quant_state {
 };
 
 void compute_k_values(quant_state *state) {
-
     for (uint32_t i = 0; i < n_x; ++i) {
         if (i < n_x / 2) {
-            state->kx[i] = (2 * PI / l_x) * i;
+            state->kx[i] = (2.0f * PI / l_x) * i;
         } else {
-            state->kx[i] = (2 * PI / l_x) * i - n_x;
+            state->kx[i] = (2.0f * PI / l_x) * (i - n_x);
         }
     }
 
     for (uint32_t i = 0; i < n_y; ++i) {
         if (i < n_y / 2) {
-            state->ky[i] = (2 * PI / l_y) * i;
+            state->ky[i] = (2.0f * PI / l_y) * i;
         } else {
-            state->ky[i] = (2 * PI / l_y) * i - n_y;
+            state->ky[i] = (2.0f * PI / l_y) * (i - n_y);
         }
     }
 
     for (uint32_t i = 0; i < n_z; ++i) {
         if (i < n_z / 2) {
-            state->kz[i] = (2 * PI / l_z) * i;
+            state->kz[i] = (2.0f * PI / l_z) * i;
         } else {
-            state->kz[i] = (2 * PI / l_z) * i - n_z;
+            state->kz[i] = (2.0f * PI / l_z) * (i - n_z);
         }
     }
 
@@ -82,8 +81,6 @@ void compute_k_values(quant_state *state) {
             }
         }
     }
-
-    return;
 }
 
 // for simplicity we made h_bar and m = 1
@@ -122,14 +119,11 @@ void init_free_particle_potential(quant_state *state) {
 
 void init_wave_function(quant_state *state, float x0, float y0, float z0, float sigma,
                         float k0x, float k0y, float k0z) {
-    float A = (PI * sigma * sigma) * std::exp(-3 / 4);
+    float A = std::pow(PI * sigma * sigma, -0.75f);
 
     float cx = l_x / 2.0f;
     float cy = l_y / 2.0f;
     float cz = l_z / 2.0f;
-
-    for (uint32_t i = 0; i < total_space_points; ++i) {
-    }
 
     for (uint32_t i = 0; i < n_x; ++i) {
         for (uint32_t j = 0; j < n_y; ++j) {
@@ -146,50 +140,51 @@ void init_wave_function(quant_state *state, float x0, float y0, float z0, float 
 
                 float r_squared = dx * dx + dy * dy + dz * dz;
 
-                float gaussian_part = std::exp(-r_squared / 4 * sigma * sigma);
+                float gaussian_part = A * std::exp(-r_squared / (4.0f * sigma * sigma));
 
-                float k0 = x * k0x + y * k0y + z * k0z;
-                float phase_part = std::exp(sqrtf(r_squared) * k0);
+                float phase = k0x * x + k0y * y + k0z * z;
 
-                // eulers formula combination into phi[idx]
-                state->psi[idx].real = gaussian_part * cos(phase_part);
-                state->psi[idx].imaginary = gaussian_part * -sin(phase_part);
+                state->psi[idx].real = gaussian_part * std::cos(phase);
+                state->psi[idx].imaginary = gaussian_part * std::sin(phase);
             }
         }
     }
 }
 
-// compute k-space grid values: k_x, k_y, k_z and k^2
 void game_init(candy_context *ctx, void *state) {
-
     (void)ctx;
 
     quant_state *quant_vis = (quant_state *)state;
 
+    // Resize all vectors
     quant_vis->psi.resize(total_space_points);
-
     quant_vis->potential.resize(total_space_points);
-
     quant_vis->prob_dens.resize(total_space_points);
-
-    quant_vis->kx.resize(total_space_points);
-
-    quant_vis->ky.resize(total_space_points);
-
-    quant_vis->kz.resize(total_space_points);
-
+    quant_vis->kx.resize(n_x);
+    quant_vis->ky.resize(n_y);
+    quant_vis->kz.resize(n_z);
     quant_vis->k_squared.resize(total_space_points);
-
     quant_vis->kinetic_factor.resize(total_space_points);
-
     quant_vis->potential_factor.resize(total_space_points);
 
+    quant_vis->dx = l_x / n_x;
+    quant_vis->dy = l_y / n_y;
+    quant_vis->dz = l_z / n_z;
+    quant_vis->time = 0.0f;
+
+    // Compute initial values on CPU
     compute_k_values(quant_vis);
     init_free_particle_potential(quant_vis);
     compute_kinetic_factors(quant_vis);
     compute_potential_factors(quant_vis);
-    init_wave_function(quant_vis, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
-                       0.0f); // at origin with no momentum
+    init_wave_function(quant_vis, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f);
+
+    if (!ctx->compute.descriptor_layout) {
+        candy_init_compute_pipeline(ctx);
+    }
+
+    candy_upload_compute_data(ctx, state);
+    candy_init_vkfft(ctx);
 
     return;
 }
@@ -218,7 +213,9 @@ void game_on_reload(void *old_state, void *new_state) {
     quant_state *quant_vis_old = (quant_state *)old_state;
     quant_state *quant_vis_new = (quant_state *)new_state;
 
-    memcpy(quant_vis_new, quant_vis_old, sizeof(quant_state));
+    if (quant_vis_old && quant_vis_new) {
+        *quant_vis_new = *quant_vis_old;
+    }
 
     uint32_t quant_vis_version = 8;
     std::cout << "Game version: " << quant_vis_version << std::endl;

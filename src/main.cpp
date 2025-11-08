@@ -120,6 +120,337 @@ void candy_get_required_extensions(const char **out_extensions, uint32_t *out_co
 // COMPUTE SHADERS
 // ============================================================================
 
+void candy_init_vkfft(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+
+    // Verify buffer exists before proceeding
+    if (ctx->compute.psi_freq_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Buffer not created before VkFFT init!" << std::endl;
+        CANDY_ASSERT(false,
+                     "psi_freq_buffer must be created before VkFFT initialization");
+    }
+
+    ctx->compute.buffer_size = nx * ny * nz * sizeof(float) * 2;
+
+    // Zero-initialize the entire config structure
+    memset(&ctx->compute.fft_config, 0, sizeof(VkFFTConfiguration));
+
+    ctx->compute.fft_config.FFTdim = 3;
+    ctx->compute.fft_config.size[0] = nx;
+    ctx->compute.fft_config.size[1] = ny;
+    ctx->compute.fft_config.size[2] = nz;
+
+    ctx->compute.fft_config.device = &ctx->core.logical_device;
+    ctx->compute.fft_config.queue = &ctx->core.graphics_queue;
+    ctx->compute.fft_config.fence = &ctx->frame_data.in_flight_fences[0];
+    ctx->compute.fft_config.commandPool = &ctx->compute.command_pool;
+    ctx->compute.fft_config.physicalDevice = &ctx->core.physical_device;
+    ctx->compute.fft_config.isCompilerInitialized = 1;
+
+    ctx->compute.fft_config.buffer = &ctx->compute.psi_freq_buffer;
+    ctx->compute.fft_config.bufferSize = &ctx->compute.buffer_size;
+
+    // Complex-to-complex transform
+    ctx->compute.fft_config.performR2C = 0;
+
+    // Additional recommended settings
+    ctx->compute.fft_config.doublePrecision = 0; // Using float, not double
+
+    std::cout << "[CANDY] Initializing forward FFT..." << std::endl;
+    VkFFTResult res_forward =
+        initializeVkFFT(&ctx->compute.fft_app_forward, ctx->compute.fft_config);
+    CANDY_ASSERT(res_forward == VKFFT_SUCCESS, "Failed to initialize forward FFT");
+
+    // For inverse, create a copy and set inverse flag
+    VkFFTConfiguration inverse_config = ctx->compute.fft_config;
+    inverse_config.inverseReturnToInputBuffer = 1; // Set inverse flag
+
+    std::cout << "[CANDY] Initializing inverse FFT..." << std::endl;
+    VkFFTResult res_inverse =
+        initializeVkFFT(&ctx->compute.fft_app_inverse, inverse_config);
+    CANDY_ASSERT(res_inverse == VKFFT_SUCCESS, "Failed to initialize inverse FFT");
+
+    std::cout << "[CANDY] VkFFT initialized for " << nx << "x" << ny << "x" << nz
+              << " grid\n";
+}
+
+void candy_perform_fft(candy_context *ctx, bool inverse) {
+    VkFFTLaunchParams launch_params = {};
+    launch_params.buffer = &ctx->compute.psi_freq_buffer;
+    launch_params.commandBuffer = &ctx->compute.command_buffer;
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    VkFFTResult result;
+    if (inverse) {
+        result = VkFFTAppend(&ctx->compute.fft_app_inverse, -1, &launch_params);
+    } else {
+        result = VkFFTAppend(&ctx->compute.fft_app_forward, -1, &launch_params);
+    }
+
+    CANDY_ASSERT(result == VKFFT_SUCCESS, "Failed to append FFT to command buffer");
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+    };
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+}
+
+void candy_cleanup_vkfft(candy_context *ctx) {
+    deleteVkFFT(&ctx->compute.fft_app_forward);
+    deleteVkFFT(&ctx->compute.fft_app_inverse);
+}
+
+// =============================================================================
+// UPLOAD DATA TO GPU
+// =============================================================================
+
+void candy_upload_compute_data(candy_context *ctx, void *game_state) {
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+    };
+
+    quant_state *state = (quant_state *)game_state;
+
+    uint32_t nx = 64, ny = 64, nz = 64;
+    VkDeviceSize buffer_size = nx * ny * nz * sizeof(complex_float);
+
+    void *data;
+
+    // Upload kinetic factors
+    vkMapMemory(ctx->core.logical_device, ctx->compute.kinetic_factor_memory, 0,
+                buffer_size, 0, &data);
+    memcpy(data, state->kinetic_factor.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.kinetic_factor_memory);
+
+    // Upload potential factors
+    vkMapMemory(ctx->core.logical_device, ctx->compute.potential_factor_memory, 0,
+                buffer_size, 0, &data);
+    memcpy(data, state->potential_factor.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.potential_factor_memory);
+
+    // Upload initial wavefunction
+    vkMapMemory(ctx->core.logical_device, ctx->compute.psi_freq_memory, 0, buffer_size, 0,
+                &data);
+    memcpy(data, state->psi.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.psi_freq_memory);
+
+    std::cout << "[CANDY] Uploaded compute data to GPU (" << buffer_size << " bytes)\n";
+}
+// =============================================================================
+// SPLIT-OPERATOR TIME STEP
+// =============================================================================
+
+void candy_quantum_timestep(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+    uint32_t push_constants[3] = {nx, ny, nz};
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    // Step 1: Apply first half kinetic evolution (in frequency space)
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[0]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[0], 0, 1,
+                            &ctx->compute.descriptor_sets[0], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[0],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    // Memory barrier
+    VkMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+    };
+    vkCmdPipelineBarrier(
+        ctx->compute.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+    };
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Step 2: IFFT to real space
+    candy_perform_fft(ctx, true);
+
+    // Step 3: Apply full potential evolution (in real space)
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[1]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[1], 0, 1,
+                            &ctx->compute.descriptor_sets[1], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[1],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    vkCmdPipelineBarrier(
+        ctx->compute.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Step 4: FFT back to frequency space
+    candy_perform_fft(ctx, false);
+
+    // Step 5: Apply last half kinetic evolution
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[2]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[2], 0, 1,
+                            &ctx->compute.descriptor_sets[2], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[2],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+}
+
+void candy_create_compute_buffers(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+    VkDeviceSize buffer_size = nx * ny * nz * sizeof(float) * 2; // vec2 for complex
+
+    // Helper lambda to create and allocate a buffer
+    auto create_buffer = [&](VkBuffer *buffer, VkDeviceMemory *memory) {
+        VkBufferCreateInfo buffer_info = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = buffer_size,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        vkCreateBuffer(ctx->core.logical_device, &buffer_info, nullptr, buffer);
+
+        VkMemoryRequirements mem_reqs;
+        vkGetBufferMemoryRequirements(ctx->core.logical_device, *buffer, &mem_reqs);
+
+        VkMemoryAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex =
+                candy_find_memory_type(ctx, mem_reqs.memoryTypeBits,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        };
+
+        vkAllocateMemory(ctx->core.logical_device, &alloc_info, nullptr, memory);
+        vkBindBufferMemory(ctx->core.logical_device, *buffer, *memory, 0);
+    };
+
+    create_buffer(&ctx->compute.psi_freq_buffer, &ctx->compute.psi_freq_memory);
+    create_buffer(&ctx->compute.kinetic_factor_buffer,
+                  &ctx->compute.kinetic_factor_memory);
+    create_buffer(&ctx->compute.potential_factor_buffer,
+                  &ctx->compute.potential_factor_memory);
+}
+
+// 2. Allocate and update descriptor sets
+void candy_create_compute_descriptor_sets(candy_context *ctx) {
+    VkDescriptorSetLayout layouts[4] = {
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+    };
+
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = ctx->compute.descriptor_pool,
+        .descriptorSetCount = 4,
+        .pSetLayouts = layouts,
+    };
+
+    vkAllocateDescriptorSets(ctx->core.logical_device, &alloc_info,
+                             ctx->compute.descriptor_sets);
+
+    // Update descriptor sets for each shader
+    for (int i = 0; i < 4; i++) {
+        VkDescriptorBufferInfo buffer_info_0 = {
+            .buffer = ctx->compute.psi_freq_buffer,
+            .offset = 0,
+            .range = VK_WHOLE_SIZE,
+        };
+
+        VkDescriptorBufferInfo buffer_info_1 = {
+            .buffer = (i == 1) ? ctx->compute.potential_factor_buffer
+                               : ctx->compute.kinetic_factor_buffer,
+            .offset = 0,
+            .range = VK_WHOLE_SIZE,
+        };
+
+        VkWriteDescriptorSet writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = ctx->compute.descriptor_sets[i],
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &buffer_info_0,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = ctx->compute.descriptor_sets[i],
+                .dstBinding = 1,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &buffer_info_1,
+            },
+        };
+
+        vkUpdateDescriptorSets(ctx->core.logical_device, 2, writes, 0, nullptr);
+    }
+}
+
 VkShaderModule candy_create_compute_shader_module(VkDevice device, const char *filepath) {
     std::vector<char> code = candy_read_shader_file(filepath);
 
@@ -197,10 +528,10 @@ void candy_create_compute_pipelines(candy_context *ctx) {
     };
 
     const char *shader_paths[4] = {
-        "../src/shaders/first_half_kin.comp.spv",
-        "../src/shaders/full_potential.comp.spv",
-        "../src/shaders/last_half_kin.comp.spv",
-        "../src/shaders/visualize.comp.spv",
+        "../src/shaders/compute/first_half_kin.comp.spv",
+        "../src/shaders/compute/full_potential.comp.spv",
+        "../src/shaders/compute/last_half_kin.comp.spv",
+        "../src/shaders/compute/visualize.comp.spv",
     };
 
     for (int i = 0; i < 4; ++i) {
@@ -282,6 +613,8 @@ void candy_create_compute_command_pool(candy_context *ctx) {
 void candy_init_compute_pipeline(candy_context *ctx) {
     candy_create_compute_descriptor_layout(ctx);
     candy_create_compute_descriptor_pool(ctx);
+    candy_create_compute_buffers(ctx);
+    candy_create_compute_descriptor_sets(ctx);
     candy_create_compute_pipelines(ctx);
     candy_create_compute_command_pool(ctx);
 
@@ -289,6 +622,15 @@ void candy_init_compute_pipeline(candy_context *ctx) {
 }
 
 void candy_cleanup_compute_pipeline(candy_context *ctx) {
+    vkDestroyBuffer(ctx->core.logical_device, ctx->compute.psi_freq_buffer, nullptr);
+    vkFreeMemory(ctx->core.logical_device, ctx->compute.psi_freq_memory, nullptr);
+    vkDestroyBuffer(ctx->core.logical_device, ctx->compute.kinetic_factor_buffer,
+                    nullptr);
+    vkFreeMemory(ctx->core.logical_device, ctx->compute.kinetic_factor_memory, nullptr);
+    vkDestroyBuffer(ctx->core.logical_device, ctx->compute.potential_factor_buffer,
+                    nullptr);
+    vkFreeMemory(ctx->core.logical_device, ctx->compute.potential_factor_memory, nullptr);
+
     vkDestroyCommandPool(ctx->core.logical_device, ctx->compute.command_pool, nullptr);
 
     for (int i = 0; i < 4; ++i) {
@@ -368,7 +710,25 @@ void candy_reload_code(candy_context *ctx) {
         return;
     }
 
-    void *new_state = malloc(ctx->game_module.api.state_size);
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+    };
+
+    void *new_state = new (std::nothrow) quant_state();
     if (!new_state) {
         std::cerr << "[CANDY ERROR] Failed to allocate new game state" << std::endl;
         return;
@@ -381,7 +741,7 @@ void candy_reload_code(candy_context *ctx) {
     }
 
     if (ctx->game_module.game_state) {
-        free(ctx->game_module.game_state);
+        delete static_cast<quant_state *>(ctx->game_module.game_state);
     }
     ctx->game_module.game_state = new_state;
 
@@ -496,7 +856,25 @@ void candy_init_game_module(candy_context *ctx) {
     std::cout << "[CANDY] Game state size: " << ctx->game_module.api.state_size
               << " bytes" << std::endl;
 
-    ctx->game_module.game_state = malloc(ctx->game_module.api.state_size);
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+    };
+
+    ctx->game_module.game_state = new (std::nothrow) quant_state();
     CANDY_ASSERT(ctx->game_module.game_state != nullptr, "Failed to allocate game state");
 
     if (ctx->game_module.api.init) {

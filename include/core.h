@@ -20,6 +20,8 @@
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_vulkan.h"
 #include "imgui.h"
+
+#define VKFFT_BACKEND 0
 #include "vkFFT.h"
 
 #include <glm/glm.hpp>
@@ -157,6 +159,22 @@ struct candy_compute_pipeline {
     VkPipeline pipelines[4]; // first_half_kin, full_potential, last_half_kin, visualize
     VkCommandPool command_pool;
     VkCommandBuffer command_buffer;
+    VkDescriptorSet descriptor_sets[4];
+
+    VkBuffer psi_freq_buffer;
+    VkDeviceMemory psi_freq_memory;
+    VkBuffer kinetic_factor_buffer;
+    VkDeviceMemory kinetic_factor_memory;
+    VkBuffer potential_factor_buffer;
+    VkDeviceMemory potential_factor_memory;
+
+    VkFFTConfiguration fft_config;
+    VkFFTApplication fft_app_forward;
+    VkFFTApplication fft_app_inverse;
+    VkBuffer fft_buffer;
+    VkDeviceMemory fft_buffer_memory;
+
+    uint64_t buffer_size;
 };
 
 struct candy_game_api {
@@ -263,3 +281,9 @@ void candy_destroy_swapchain(candy_context *ctx);
 candy_queue_family_indices candy_find_queue_families(VkPhysicalDevice device,
                                                      VkSurfaceKHR surface);
 static std::vector<char> candy_read_shader_file(const std::string &filename);
+uint32_t candy_find_memory_type(candy_context *ctx, uint32_t type_filter,
+                                VkMemoryPropertyFlags props);
+
+void candy_upload_compute_data(candy_context *ctx, void *state);
+void candy_init_vkfft(candy_context *ctx);
+void candy_init_compute_pipeline(candy_context *ctx);

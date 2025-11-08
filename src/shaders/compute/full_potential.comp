@@ -6,7 +6,7 @@ layout(set = 0, binding = 0) buffer PsiFreq {
     vec2 psi_freq[]; // complex numbers stored as vec2 (real, imag)
 };
 
-layout(set = 0, binding = 1) buffer PotentialFactort {
+layout(set = 0, binding = 1) buffer PotentialFactor {
     vec2 potential_factor[];
 };
 

@@ -1,18 +1,9 @@
 #include "core.h"
+#include <cmath>
 #include <cstring>
 #include <vector>
 
 #define PI 3.14159265358979323846f
-
-struct complex_float {
-    float real = 0.0f;
-    float imaginary = 0.0f;
-
-    complex_float operator*(const complex_float &other) {
-        return {real * other.real - imaginary * other.imaginary,
-                real * other.imaginary + imaginary * other.real};
-    }
-};
 
 extern "C" {
 const uint32_t n_x = 64;
@@ -24,6 +15,16 @@ const float l_x = 20.0f;
 const float l_y = 20.0f;
 const float l_z = 20.0f;
 const float delta_time = 0.01f;
+
+struct complex_float {
+    float real = 0.0f;
+    float imaginary = 0.0f;
+
+    complex_float operator*(const complex_float &other) {
+        return {real * other.real - imaginary * other.imaginary,
+                real * other.imaginary + imaginary * other.real};
+    }
+};
 
 struct quant_state {
     // CPU side copies for init
@@ -88,7 +89,7 @@ void compute_k_values(quant_state *state) {
 // for simplicity we made h_bar and m = 1
 void compute_kinetic_factors(quant_state *state) {
 
-    std::vector<complex_float> result;
+    std::vector<complex_float> result(total_space_points);
 
     // We can use Euler's formula: exp(i*theta) =
     // cos(theta) + i*sin(theta)
@@ -119,10 +120,42 @@ void init_free_particle_potential(quant_state *state) {
     }
 }
 
-void init_wave_function(quant_state *state, float sigma) {
+void init_wave_function(quant_state *state, float x0, float y0, float z0, float sigma,
+                        float k0x, float k0y, float k0z) {
     float A = (PI * sigma * sigma) * std::exp(-3 / 4);
+
+    float cx = l_x / 2.0f;
+    float cy = l_y / 2.0f;
+    float cz = l_z / 2.0f;
+
     for (uint32_t i = 0; i < total_space_points; ++i) {
-        float gaussian_part = A;
+    }
+
+    for (uint32_t i = 0; i < n_x; ++i) {
+        for (uint32_t j = 0; j < n_y; ++j) {
+            for (uint32_t k = 0; k < n_z; ++k) {
+                uint32_t idx = i + n_x * (j + n_y * k);
+
+                float x = i * state->dx - cx;
+                float y = j * state->dy - cy;
+                float z = k * state->dz - cz;
+
+                float dx = x - x0;
+                float dy = y - y0;
+                float dz = z - z0;
+
+                float r_squared = dx * dx + dy * dy + dz * dz;
+
+                float gaussian_part = std::exp(-r_squared / 4 * sigma * sigma);
+
+                float k0 = x * k0x + y * k0y + z * k0z;
+                float phase_part = std::exp(sqrtf(r_squared) * k0);
+
+                // eulers formula combination into phi[idx]
+                state->psi[idx].real = gaussian_part * cos(phase_part);
+                state->psi[idx].imaginary = gaussian_part * -sin(phase_part);
+            }
+        }
     }
 }
 
@@ -155,6 +188,8 @@ void game_init(candy_context *ctx, void *state) {
     init_free_particle_potential(quant_vis);
     compute_kinetic_factors(quant_vis);
     compute_potential_factors(quant_vis);
+    init_wave_function(quant_vis, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                       0.0f); // at origin with no momentum
 
     return;
 }

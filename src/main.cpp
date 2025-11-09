@@ -120,6 +120,7 @@ void candy_get_required_extensions(const char **out_extensions, uint32_t *out_co
 // COMPUTE SHADERS
 // ============================================================================
 
+/*
 void candy_init_vkfft(candy_context *ctx) {
     uint32_t nx = 64, ny = 64, nz = 64;
 
@@ -173,6 +174,108 @@ void candy_init_vkfft(candy_context *ctx) {
     std::cout << "[CANDY] VkFFT initialized for " << nx << "x" << ny << "x" << nz
               << " grid\n";
 }
+*/
+void candy_init_vkfft(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+
+    // Verify buffer exists before proceeding
+    if (ctx->compute.psi_freq_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Buffer not created before VkFFT init!" << std::endl;
+        CANDY_ASSERT(false,
+                     "psi_freq_buffer must be created before VkFFT initialization");
+    }
+
+    ctx->compute.buffer_size = nx * ny * nz * sizeof(float) * 2;
+
+    // Create a fence for VkFFT to use
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+    };
+
+    VkFence vkfft_fence;
+    VkResult fence_result =
+        vkCreateFence(ctx->core.logical_device, &fence_info, nullptr, &vkfft_fence);
+    CANDY_ASSERT(fence_result == VK_SUCCESS, "Failed to create VkFFT fence");
+
+    // Zero-initialize the entire config structure
+    memset(&ctx->compute.fft_config, 0, sizeof(VkFFTConfiguration));
+
+    ctx->compute.fft_config.FFTdim = 3;
+    ctx->compute.fft_config.size[0] = nx;
+    ctx->compute.fft_config.size[1] = ny;
+    ctx->compute.fft_config.size[2] = nz;
+
+    // Critical: Use the actual values, not pointers to context members
+    // VkFFT stores these as values internally
+    ctx->compute.fft_config.device = &ctx->core.logical_device;
+    ctx->compute.fft_config.queue = &ctx->core.graphics_queue;
+    ctx->compute.fft_config.physicalDevice = &ctx->core.physical_device;
+    ctx->compute.fft_config.commandPool = &ctx->compute.command_pool;
+
+    // Provide the fence pointer - VkFFT REQUIRES this
+    ctx->compute.fft_config.fence = &vkfft_fence;
+
+    ctx->compute.fft_config.isCompilerInitialized = 1;
+
+    // Buffer configuration
+    ctx->compute.fft_config.buffer = &ctx->compute.psi_freq_buffer;
+    ctx->compute.fft_config.bufferSize = &ctx->compute.buffer_size;
+
+    // Complex-to-complex transform
+    ctx->compute.fft_config.performR2C = 0;
+    ctx->compute.fft_config.doublePrecision = 0;
+
+    // Important: Tell VkFFT we're using GPU memory
+    ctx->compute.fft_config.bufferStride[0] = nx;
+    ctx->compute.fft_config.bufferStride[1] = ny;
+    ctx->compute.fft_config.bufferStride[2] = nz;
+
+    std::cout << "[CANDY] Initializing forward FFT..." << std::endl;
+    VkFFTResult res_forward =
+        initializeVkFFT(&ctx->compute.fft_app_forward, ctx->compute.fft_config);
+
+    if (res_forward != VKFFT_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Forward FFT init failed with code: " << res_forward
+                  << std::endl;
+
+        // Print more diagnostic info
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(ctx->core.physical_device, &props);
+        std::cerr << "  Device: " << props.deviceName << std::endl;
+        std::cerr << "  Buffer size: " << ctx->compute.buffer_size << " bytes"
+                  << std::endl;
+        std::cerr << "  Grid dimensions: " << nx << "x" << ny << "x" << nz << std::endl;
+
+        vkDestroyFence(ctx->core.logical_device, vkfft_fence, nullptr);
+        CANDY_ASSERT(false, "Failed to initialize forward FFT");
+    }
+
+    // For inverse, create a copy and set inverse flag
+    VkFFTConfiguration inverse_config = ctx->compute.fft_config;
+    inverse_config.inverseReturnToInputBuffer = 1;
+
+    std::cout << "[CANDY] Initializing inverse FFT..." << std::endl;
+    VkFFTResult res_inverse =
+        initializeVkFFT(&ctx->compute.fft_app_inverse, inverse_config);
+
+    if (res_inverse != VKFFT_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Inverse FFT init failed with code: " << res_inverse
+                  << std::endl;
+        deleteVkFFT(&ctx->compute.fft_app_forward); // Clean up forward transform
+        vkDestroyFence(ctx->core.logical_device, vkfft_fence, nullptr);
+        CANDY_ASSERT(false, "Failed to initialize inverse FFT");
+    }
+
+    // Store the fence so we can clean it up later
+    // You'll need to add this to your candy_context struct:
+    // VkFence vkfft_fence;
+    ctx->compute.vkfft_fence = vkfft_fence;
+
+    std::cout << "[CANDY] VkFFT initialized for " << nx << "x" << ny << "x" << nz
+              << " grid\n";
+}
 
 void candy_perform_fft(candy_context *ctx, bool inverse) {
     VkFFTLaunchParams launch_params = {};
@@ -207,9 +310,65 @@ void candy_perform_fft(candy_context *ctx, bool inverse) {
     vkQueueWaitIdle(ctx->core.graphics_queue);
 }
 
+/*
+void candy_perform_fft(candy_context *ctx, bool inverse) {
+    VkFFTLaunchParams launch_params = {};
+    launch_params.buffer = &ctx->compute.psi_freq_buffer;
+    launch_params.commandBuffer = &ctx->compute.fft_command_buffer; // ✅ Use FFT buffer
+
+    // Reset FFT command buffer
+    vkResetCommandBuffer(ctx->compute.fft_command_buffer, 0); // ✅ Changed
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    VkResult begin_result =
+        vkBeginCommandBuffer(ctx->compute.fft_command_buffer, &begin_info); // ✅ Changed
+    if (begin_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to begin command buffer for FFT" << std::endl;
+        return;
+    }
+
+    VkFFTResult result;
+    if (inverse) {
+        result = VkFFTAppend(&ctx->compute.fft_app_inverse, -1, &launch_params);
+    } else {
+        result = VkFFTAppend(&ctx->compute.fft_app_forward, -1, &launch_params);
+    }
+
+    if (result != VKFFT_SUCCESS) {
+        std::cerr << "[CANDY ERROR] VkFFTAppend failed with code: " << result
+                  << std::endl;
+        vkEndCommandBuffer(ctx->compute.fft_command_buffer); // ✅ Changed
+        return;
+    }
+
+    vkEndCommandBuffer(ctx->compute.fft_command_buffer); // ✅ Changed
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.fft_command_buffer, // ✅ Changed
+    };
+
+    VkResult submit_result =
+        vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    if (submit_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to submit FFT command buffer" << std::endl;
+        return;
+    }
+
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+}
+*/
+
 void candy_cleanup_vkfft(candy_context *ctx) {
     deleteVkFFT(&ctx->compute.fft_app_forward);
     deleteVkFFT(&ctx->compute.fft_app_inverse);
+
+    vkDestroyFence(ctx->core.logical_device, ctx->compute.vkfft_fence, nullptr);
 }
 
 // =============================================================================
@@ -265,7 +424,7 @@ void candy_upload_compute_data(candy_context *ctx, void *game_state) {
 // =============================================================================
 // SPLIT-OPERATOR TIME STEP
 // =============================================================================
-
+/*
 void candy_quantum_timestep(candy_context *ctx) {
     uint32_t nx = 64, ny = 64, nz = 64;
     uint32_t push_constants[3] = {nx, ny, nz};
@@ -355,6 +514,103 @@ void candy_quantum_timestep(candy_context *ctx) {
     vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
     vkQueueWaitIdle(ctx->core.graphics_queue);
 }
+*/
+
+void candy_quantum_timestep(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+    uint32_t push_constants[3] = {nx, ny, nz};
+
+    // Reset command buffer at the start
+    vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    // Step 1: Apply first half kinetic evolution (in frequency space)
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[0]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[0], 0, 1,
+                            &ctx->compute.descriptor_sets[0], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[0],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    // Proper memory barrier
+    VkMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+    vkCmdPipelineBarrier(
+        ctx->compute.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    // Submit and wait
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+    };
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Step 2: IFFT to real space
+    candy_perform_fft(ctx, true);
+
+    // Step 3: Apply full potential evolution (in real space)
+    vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[1]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[1], 0, 1,
+                            &ctx->compute.descriptor_sets[1], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[1],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    vkCmdPipelineBarrier(
+        ctx->compute.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Step 4: FFT back to frequency space
+    candy_perform_fft(ctx, false);
+
+    // Step 5: Apply last half kinetic evolution
+    vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[2]);
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[2], 0, 1,
+                            &ctx->compute.descriptor_sets[2], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[2],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+}
 
 void candy_create_compute_buffers(candy_context *ctx) {
     uint32_t nx = 64, ny = 64, nz = 64;
@@ -394,7 +650,700 @@ void candy_create_compute_buffers(candy_context *ctx) {
                   &ctx->compute.potential_factor_memory);
 }
 
+void candy_create_prob_density_buffer(candy_context *ctx) {
+    uint32_t nx = 64, ny = 64, nz = 64;
+    VkDeviceSize buffer_size = nx * ny * nz * sizeof(float);
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    vkCreateBuffer(ctx->core.logical_device, &buffer_info, nullptr,
+                   &ctx->compute.prob_density_buffer);
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(ctx->core.logical_device,
+                                  ctx->compute.prob_density_buffer, &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = candy_find_memory_type(
+            ctx, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    vkAllocateMemory(ctx->core.logical_device, &alloc_info, nullptr,
+                     &ctx->compute.prob_density_memory);
+    vkBindBufferMemory(ctx->core.logical_device, ctx->compute.prob_density_buffer,
+                       ctx->compute.prob_density_memory, 0);
+}
+
+/*
+void candy_update_particle_vertices(candy_context *ctx, void *game_state) {
+
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+
+        glm::mat4 view_proj_matrix;
+        float density_threshold;
+    };
+    quant_state *state = (quant_state *)game_state;
+    uint32_t nx = 64, ny = 64, nz = 64;
+
+    vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+
+    // Run visualize compute shader
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+
+    uint32_t push_constants[3] = {nx, ny, nz};
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[3]); // visualize shader
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[3], 0, 1,
+                            &ctx->compute.descriptor_sets[3], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[3],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+    };
+
+    vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Read back density data
+    void *data;
+    vkMapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory, 0,
+                VK_WHOLE_SIZE, 0, &data);
+    float *densities = (float *)data;
+
+    // Generate particles for visualization
+    std::vector<candy_particle> particles;
+    particles.reserve(nx * ny * nz / 10); // Rough estimate
+
+    float dx = state->dx;
+    float dy = state->dy;
+    float dz = state->dz;
+    float cx = 20.0f / 2.0f;
+    float cy = 20.0f / 2.0f;
+    float cz = 20.0f / 2.0f;
+
+    for (uint32_t i = 0; i < nx; ++i) {
+        for (uint32_t j = 0; j < ny; ++j) {
+            for (uint32_t k = 0; k < nz; ++k) {
+                uint32_t idx = i + nx * (j + ny * k);
+                float density = densities[idx];
+
+                if (density > state->density_threshold) {
+                    candy_particle p;
+                    p.position = glm::vec3(i * dx - cx, j * dy - cy, k * dz - cz);
+                    p.density = density;
+                    particles.push_back(p);
+                }
+            }
+        }
+    }
+
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory);
+
+    ctx->core.particle_count = particles.size();
+
+    if (particles.empty()) {
+        ctx->core.particle_count = 0;
+        std::cout << "[CANDY] Generated 0 particles\n";
+        return;
+    }
+
+    // Update particle vertex buffer
+    if (ctx->core.particle_vertex_buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(ctx->core.logical_device);
+        vkDestroyBuffer(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                        nullptr);
+        vkFreeMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory,
+                     nullptr);
+    }
+
+    VkDeviceSize buffer_size = sizeof(candy_particle) * particles.size();
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    vkCreateBuffer(ctx->core.logical_device, &buffer_info, nullptr,
+                   &ctx->core.particle_vertex_buffer);
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(ctx->core.logical_device,
+                                  ctx->core.particle_vertex_buffer, &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = candy_find_memory_type(
+            ctx, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    vkAllocateMemory(ctx->core.logical_device, &alloc_info, nullptr,
+                     &ctx->core.particle_vertex_buffer_memory);
+    vkBindBufferMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                       ctx->core.particle_vertex_buffer_memory, 0);
+
+    vkMapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory, 0,
+                buffer_size, 0, &data);
+    memcpy(data, particles.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory);
+
+    std::cout << "[CANDY] Generated " << particles.size() << " particles\n";
+}
+*/
+/*
+void candy_update_particle_vertices(candy_context *ctx, void *game_state) {
+
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+        glm::mat4 view_proj_matrix;
+        float density_threshold;
+    };
+
+    quant_state *state = (quant_state *)game_state;
+    uint32_t nx = 64, ny = 64, nz = 64;
+
+    // Reset and begin command buffer
+    vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    VkResult begin_result =
+        vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+    if (begin_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to begin command buffer for visualization"
+                  << std::endl;
+        return;
+    }
+
+    // Bind pipeline and descriptor sets
+    uint32_t push_constants[3] = {nx, ny, nz};
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[3]); // visualize shader
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[3], 0, 1,
+                            &ctx->compute.descriptor_sets[3], 0, nullptr);
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[3],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    vkCmdDispatch(ctx->compute.command_buffer, (nx + 7) / 8, (ny + 7) / 8, (nz + 7) / 8);
+
+    // Add memory barrier to ensure compute shader writes are visible to host reads
+    VkMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+    };
+    vkCmdPipelineBarrier(ctx->compute.command_buffer,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    vkEndCommandBuffer(ctx->compute.command_buffer);
+
+    // Submit and wait for completion
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+    };
+
+    VkResult submit_result =
+        vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    if (submit_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to submit visualization command buffer"
+                  << std::endl;
+        return;
+    }
+
+    // CRITICAL: Wait for the compute shader to finish
+    vkQueueWaitIdle(ctx->core.graphics_queue);
+
+    // Now it's safe to read back density data
+    void *data;
+    VkResult map_result =
+        vkMapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory, 0,
+                    VK_WHOLE_SIZE, 0, &data);
+    if (map_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to map prob_density memory" << std::endl;
+        return;
+    }
+
+    float *densities = (float *)data;
+
+    // Generate particles for visualization
+    std::vector<candy_particle> particles;
+    particles.reserve(nx * ny * nz / 10); // Rough estimate
+
+    float dx = state->dx;
+    float dy = state->dy;
+    float dz = state->dz;
+    float cx = 20.0f / 2.0f;
+    float cy = 20.0f / 2.0f;
+    float cz = 20.0f / 2.0f;
+
+    for (uint32_t i = 0; i < nx; ++i) {
+        for (uint32_t j = 0; j < ny; ++j) {
+            for (uint32_t k = 0; k < nz; ++k) {
+                uint32_t idx = i + nx * (j + ny * k);
+                float density = densities[idx];
+
+                if (density > state->density_threshold) {
+                    candy_particle p;
+                    p.position = glm::vec3(i * dx - cx, j * dy - cy, k * dz - cz);
+                    p.density = density;
+                    particles.push_back(p);
+                }
+            }
+        }
+    }
+
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory);
+
+    ctx->core.particle_count = particles.size();
+
+    if (particles.empty()) {
+        ctx->core.particle_count = 0;
+        std::cout << "[CANDY] Generated 0 particles (threshold may be too high: "
+                  << state->density_threshold << ")\n";
+        return;
+    }
+
+    // Clean up old particle buffer if it exists
+    if (ctx->core.particle_vertex_buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(ctx->core.logical_device);
+        vkDestroyBuffer(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                        nullptr);
+        vkFreeMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory,
+                     nullptr);
+    }
+
+    // Create new particle vertex buffer
+    VkDeviceSize buffer_size = sizeof(candy_particle) * particles.size();
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VkResult create_result = vkCreateBuffer(ctx->core.logical_device, &buffer_info,
+                                            nullptr, &ctx->core.particle_vertex_buffer);
+    if (create_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to create particle vertex buffer" << std::endl;
+        return;
+    }
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(ctx->core.logical_device,
+                                  ctx->core.particle_vertex_buffer, &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = candy_find_memory_type(
+            ctx, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    VkResult alloc_result =
+        vkAllocateMemory(ctx->core.logical_device, &alloc_info, nullptr,
+                         &ctx->core.particle_vertex_buffer_memory);
+    if (alloc_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to allocate particle vertex buffer memory"
+                  << std::endl;
+        vkDestroyBuffer(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                        nullptr);
+        ctx->core.particle_vertex_buffer = VK_NULL_HANDLE;
+        return;
+    }
+
+    vkBindBufferMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                       ctx->core.particle_vertex_buffer_memory, 0);
+
+    // Upload particle data
+    map_result =
+        vkMapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory, 0,
+                    buffer_size, 0, &data);
+    if (map_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to map particle vertex buffer memory"
+                  << std::endl;
+        return;
+    }
+
+    memcpy(data, particles.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory);
+
+    std::cout << "[CANDY] Generated " << particles.size()
+              << " particles (threshold: " << state->density_threshold << ")\n";
+}
+*/
+
+void candy_update_particle_vertices(candy_context *ctx, void *game_state) {
+    std::cout << "[CANDY DEBUG] === ENTERING candy_update_particle_vertices ==="
+              << std::endl;
+
+    if (!ctx || !game_state) {
+        std::cerr << "[CANDY ERROR] NULL pointer!" << std::endl;
+        return;
+    }
+
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+        glm::mat4 view_proj_matrix;
+        float density_threshold;
+    };
+
+    quant_state *state = (quant_state *)game_state;
+    uint32_t nx = 64, ny = 64, nz = 64;
+
+    // CRITICAL FIX: Wait for ALL previous compute operations to complete
+    // This ensures the command buffer is not in use before we reset it
+    std::cout
+        << "[CANDY DEBUG] Waiting for queue to be idle before resetting command buffer..."
+        << std::endl;
+    VkResult wait_result = vkQueueWaitIdle(ctx->core.graphics_queue);
+    if (wait_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to wait for queue idle: " << wait_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Queue is idle, safe to reset command buffer" << std::endl;
+
+    // Now it's safe to reset the command buffer
+    std::cout << "[CANDY DEBUG] About to reset command buffer..." << std::endl;
+    VkResult reset_result = vkResetCommandBuffer(ctx->compute.command_buffer, 0);
+    if (reset_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to reset command buffer: " << reset_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Command buffer reset successful" << std::endl;
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = nullptr,
+    };
+
+    std::cout << "[CANDY DEBUG] About to begin command buffer..." << std::endl;
+    VkResult begin_result =
+        vkBeginCommandBuffer(ctx->compute.command_buffer, &begin_info);
+    if (begin_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to begin command buffer: " << begin_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Command buffer begin successful" << std::endl;
+
+    // Bind pipeline
+    std::cout << "[CANDY DEBUG] About to bind pipeline..." << std::endl;
+    vkCmdBindPipeline(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      ctx->compute.pipelines[3]);
+    std::cout << "[CANDY DEBUG] Pipeline bound" << std::endl;
+
+    // Bind descriptor sets
+    std::cout << "[CANDY DEBUG] About to bind descriptor sets..." << std::endl;
+    std::cout << "[CANDY DEBUG]   Pipeline layout: " << ctx->compute.pipeline_layouts[3]
+              << std::endl;
+    std::cout << "[CANDY DEBUG]   Descriptor set: " << ctx->compute.descriptor_sets[3]
+              << std::endl;
+
+    vkCmdBindDescriptorSets(ctx->compute.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->compute.pipeline_layouts[3], 0, 1,
+                            &ctx->compute.descriptor_sets[3], 0, nullptr);
+    std::cout << "[CANDY DEBUG] Descriptor sets bound" << std::endl;
+
+    // Push constants
+    uint32_t push_constants[3] = {nx, ny, nz};
+    std::cout << "[CANDY DEBUG] About to push constants: " << push_constants[0] << ", "
+              << push_constants[1] << ", " << push_constants[2] << std::endl;
+
+    vkCmdPushConstants(ctx->compute.command_buffer, ctx->compute.pipeline_layouts[3],
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants),
+                       push_constants);
+    std::cout << "[CANDY DEBUG] Push constants set" << std::endl;
+
+    // Dispatch compute shader
+    uint32_t dispatch_x = (nx + 7) / 8;
+    uint32_t dispatch_y = (ny + 7) / 8;
+    uint32_t dispatch_z = (nz + 7) / 8;
+    std::cout << "[CANDY DEBUG] About to dispatch: " << dispatch_x << "x" << dispatch_y
+              << "x" << dispatch_z << std::endl;
+
+    vkCmdDispatch(ctx->compute.command_buffer, dispatch_x, dispatch_y, dispatch_z);
+    std::cout << "[CANDY DEBUG] Dispatch recorded" << std::endl;
+
+    // Memory barrier
+    std::cout << "[CANDY DEBUG] About to add memory barrier..." << std::endl;
+    VkMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+    };
+    vkCmdPipelineBarrier(ctx->compute.command_buffer,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+    std::cout << "[CANDY DEBUG] Memory barrier added" << std::endl;
+
+    // End command buffer
+    std::cout << "[CANDY DEBUG] About to end command buffer..." << std::endl;
+    VkResult end_result = vkEndCommandBuffer(ctx->compute.command_buffer);
+    if (end_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to end command buffer: " << end_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Command buffer ended" << std::endl;
+
+    // Submit command buffer
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = nullptr,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &ctx->compute.command_buffer,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr,
+    };
+
+    std::cout << "[CANDY DEBUG] About to submit command buffer..." << std::endl;
+    VkResult submit_result =
+        vkQueueSubmit(ctx->core.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    if (submit_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to submit command buffer: " << submit_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Command buffer submitted" << std::endl;
+
+    // Wait for completion
+    std::cout << "[CANDY DEBUG] About to wait for queue idle..." << std::endl;
+    wait_result = vkQueueWaitIdle(ctx->core.graphics_queue);
+    if (wait_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to wait for queue idle: " << wait_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Queue idle - compute shader finished" << std::endl;
+
+    // Map memory and read results
+    void *data = nullptr;
+    std::cout << "[CANDY DEBUG] About to map memory..." << std::endl;
+
+    VkResult map_result =
+        vkMapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory, 0,
+                    VK_WHOLE_SIZE, 0, &data);
+    if (map_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to map prob_density memory: " << map_result
+                  << std::endl;
+        return;
+    }
+    std::cout << "[CANDY DEBUG] Memory mapped successfully" << std::endl;
+
+    if (!data) {
+        std::cerr << "[CANDY ERROR] Mapped data pointer is NULL!" << std::endl;
+        return;
+    }
+
+    float *densities = (float *)data;
+
+    // Generate particles
+    std::cout << "[CANDY DEBUG] Generating particles..." << std::endl;
+    std::vector<candy_particle> particles;
+    particles.reserve(nx * ny * nz / 10);
+
+    float dx = state->dx;
+    float dy = state->dy;
+    float dz = state->dz;
+    float cx = 20.0f / 2.0f;
+    float cy = 20.0f / 2.0f;
+    float cz = 20.0f / 2.0f;
+
+    for (uint32_t i = 0; i < nx; ++i) {
+        for (uint32_t j = 0; j < ny; ++j) {
+            for (uint32_t k = 0; k < nz; ++k) {
+                uint32_t idx = i + nx * (j + ny * k);
+                float density = densities[idx];
+
+                if (density > state->density_threshold) {
+                    candy_particle p;
+                    p.position = glm::vec3(i * dx - cx, j * dy - cy, k * dz - cz);
+                    p.density = density;
+                    particles.push_back(p);
+                }
+            }
+        }
+    }
+
+    vkUnmapMemory(ctx->core.logical_device, ctx->compute.prob_density_memory);
+
+    ctx->core.particle_count = particles.size();
+
+    if (particles.empty()) {
+        ctx->core.particle_count = 0;
+        std::cout << "[CANDY] Generated 0 particles (threshold: "
+                  << state->density_threshold << ")" << std::endl;
+        return;
+    }
+
+    // Clean up old particle buffer
+    if (ctx->core.particle_vertex_buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(ctx->core.logical_device);
+        vkDestroyBuffer(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                        nullptr);
+        vkFreeMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory,
+                     nullptr);
+        ctx->core.particle_vertex_buffer = VK_NULL_HANDLE;
+        ctx->core.particle_vertex_buffer_memory = VK_NULL_HANDLE;
+    }
+
+    // Create new particle vertex buffer
+    VkDeviceSize buffer_size = sizeof(candy_particle) * particles.size();
+
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = nullptr,
+    };
+
+    VkResult create_result = vkCreateBuffer(ctx->core.logical_device, &buffer_info,
+                                            nullptr, &ctx->core.particle_vertex_buffer);
+    if (create_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to create particle vertex buffer: "
+                  << create_result << std::endl;
+        return;
+    }
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(ctx->core.logical_device,
+                                  ctx->core.particle_vertex_buffer, &mem_reqs);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = candy_find_memory_type(
+            ctx, mem_reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    };
+
+    VkResult alloc_result =
+        vkAllocateMemory(ctx->core.logical_device, &alloc_info, nullptr,
+                         &ctx->core.particle_vertex_buffer_memory);
+    if (alloc_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to allocate particle vertex buffer memory: "
+                  << alloc_result << std::endl;
+        vkDestroyBuffer(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                        nullptr);
+        ctx->core.particle_vertex_buffer = VK_NULL_HANDLE;
+        return;
+    }
+
+    vkBindBufferMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer,
+                       ctx->core.particle_vertex_buffer_memory, 0);
+
+    // Upload particle data
+    map_result =
+        vkMapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory, 0,
+                    buffer_size, 0, &data);
+    if (map_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to map particle vertex buffer memory: "
+                  << map_result << std::endl;
+        return;
+    }
+
+    memcpy(data, particles.data(), buffer_size);
+    vkUnmapMemory(ctx->core.logical_device, ctx->core.particle_vertex_buffer_memory);
+
+    std::cout << "[CANDY] Generated " << particles.size()
+              << " particles (threshold: " << state->density_threshold << ")"
+              << std::endl;
+
+    std::cout << "[CANDY DEBUG] === EXITING candy_update_particle_vertices ==="
+              << std::endl;
+}
+
 // 2. Allocate and update descriptor sets
+/*
 void candy_create_compute_descriptor_sets(candy_context *ctx) {
     VkDescriptorSetLayout layouts[4] = {
         ctx->compute.descriptor_layout,
@@ -421,12 +1370,26 @@ void candy_create_compute_descriptor_sets(candy_context *ctx) {
             .range = VK_WHOLE_SIZE,
         };
 
-        VkDescriptorBufferInfo buffer_info_1 = {
-            .buffer = (i == 1) ? ctx->compute.potential_factor_buffer
-                               : ctx->compute.kinetic_factor_buffer,
-            .offset = 0,
-            .range = VK_WHOLE_SIZE,
-        };
+        VkDescriptorBufferInfo buffer_info_1;
+        if (i == 3) { // Visualize shader needs prob_density buffer
+            buffer_info_1 = {
+                .buffer = ctx->compute.prob_density_buffer,
+                .offset = 0,
+                .range = VK_WHOLE_SIZE,
+            };
+        } else if (i == 1) { // Potential shader
+            buffer_info_1 = {
+                .buffer = ctx->compute.potential_factor_buffer,
+                .offset = 0,
+                .range = VK_WHOLE_SIZE,
+            };
+        } else { // Kinetic shaders
+            buffer_info_1 = {
+                .buffer = ctx->compute.kinetic_factor_buffer,
+                .offset = 0,
+                .range = VK_WHOLE_SIZE,
+            };
+        }
 
         VkWriteDescriptorSet writes[2] = {
             {
@@ -450,6 +1413,270 @@ void candy_create_compute_descriptor_sets(candy_context *ctx) {
         vkUpdateDescriptorSets(ctx->core.logical_device, 2, writes, 0, nullptr);
     }
 }
+*/
+
+void candy_create_compute_descriptor_sets(candy_context *ctx) {
+    std::cout << "[CANDY DEBUG] Creating compute descriptor sets..." << std::endl;
+
+    // Validate prerequisites
+    if (ctx->compute.descriptor_pool == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Descriptor pool is NULL before allocation!"
+                  << std::endl;
+        CANDY_ASSERT(false, "Descriptor pool not created");
+    }
+
+    if (ctx->compute.descriptor_layout == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Descriptor layout is NULL before allocation!"
+                  << std::endl;
+        CANDY_ASSERT(false, "Descriptor layout not created");
+    }
+
+    // Validate all buffers exist
+    if (ctx->compute.psi_freq_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] psi_freq_buffer is NULL!" << std::endl;
+        CANDY_ASSERT(false, "psi_freq_buffer not created");
+    }
+    if (ctx->compute.kinetic_factor_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] kinetic_factor_buffer is NULL!" << std::endl;
+        CANDY_ASSERT(false, "kinetic_factor_buffer not created");
+    }
+    if (ctx->compute.potential_factor_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] potential_factor_buffer is NULL!" << std::endl;
+        CANDY_ASSERT(false, "potential_factor_buffer not created");
+    }
+    if (ctx->compute.prob_density_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] prob_density_buffer is NULL!" << std::endl;
+        CANDY_ASSERT(false, "prob_density_buffer not created");
+    }
+
+    VkDescriptorSetLayout layouts[4] = {
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+        ctx->compute.descriptor_layout,
+    };
+
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .descriptorPool = ctx->compute.descriptor_pool,
+        .descriptorSetCount = 4,
+        .pSetLayouts = layouts,
+    };
+
+    VkResult alloc_result = vkAllocateDescriptorSets(
+        ctx->core.logical_device, &alloc_info, ctx->compute.descriptor_sets);
+    if (alloc_result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to allocate descriptor sets: " << alloc_result
+                  << std::endl;
+        CANDY_ASSERT(false, "Failed to allocate descriptor sets");
+    }
+
+    std::cout << "[CANDY DEBUG] Descriptor sets allocated successfully" << std::endl;
+    for (int i = 0; i < 4; i++) {
+        std::cout << "[CANDY DEBUG]   Set " << i << ": "
+                  << ctx->compute.descriptor_sets[i] << std::endl;
+    }
+
+    // Update descriptor sets for each shader
+    for (int i = 0; i < 4; i++) {
+        std::cout << "[CANDY DEBUG] Updating descriptor set " << i << "..." << std::endl;
+
+        // Binding 0 - always psi_freq_buffer
+        VkDescriptorBufferInfo buffer_info_0 = {
+            .buffer = ctx->compute.psi_freq_buffer,
+            .offset = 0,
+            .range = VK_WHOLE_SIZE,
+        };
+
+        // Binding 1 - depends on shader
+        VkDescriptorBufferInfo buffer_info_1;
+        const char *binding1_name;
+
+        if (i == 3) {
+            // Visualize shader
+            buffer_info_1.buffer = ctx->compute.prob_density_buffer;
+            binding1_name = "prob_density_buffer";
+        } else if (i == 1) {
+            // Potential shader
+            buffer_info_1.buffer = ctx->compute.potential_factor_buffer;
+            binding1_name = "potential_factor_buffer";
+        } else {
+            // Kinetic shaders
+            buffer_info_1.buffer = ctx->compute.kinetic_factor_buffer;
+            binding1_name = "kinetic_factor_buffer";
+        }
+
+        buffer_info_1.offset = 0;
+        buffer_info_1.range = VK_WHOLE_SIZE;
+
+        std::cout << "[CANDY DEBUG]   Binding 0: psi_freq_buffer = "
+                  << ctx->compute.psi_freq_buffer << std::endl;
+        std::cout << "[CANDY DEBUG]   Binding 1: " << binding1_name << " = "
+                  << buffer_info_1.buffer << std::endl;
+
+        VkWriteDescriptorSet writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = ctx->compute.descriptor_sets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &buffer_info_0,
+                .pTexelBufferView = nullptr,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = nullptr,
+                .dstSet = ctx->compute.descriptor_sets[i],
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pImageInfo = nullptr,
+                .pBufferInfo = &buffer_info_1,
+                .pTexelBufferView = nullptr,
+            },
+        };
+
+        vkUpdateDescriptorSets(ctx->core.logical_device, 2, writes, 0, nullptr);
+        std::cout << "[CANDY DEBUG] Descriptor set " << i << " updated successfully"
+                  << std::endl;
+    }
+
+    std::cout << "[CANDY DEBUG] All descriptor sets created and updated" << std::endl;
+}
+
+void candy_validate_compute_pipeline(candy_context *ctx) {
+    std::cout << "\n[CANDY DEBUG] ========== VALIDATING COMPUTE PIPELINE =========="
+              << std::endl;
+
+    bool all_valid = true;
+
+    // Check descriptor pool
+    if (ctx->compute.descriptor_pool == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Descriptor pool is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ Descriptor pool: " << ctx->compute.descriptor_pool
+                  << std::endl;
+    }
+
+    // Check descriptor layout
+    if (ctx->compute.descriptor_layout == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Descriptor layout is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ Descriptor layout: "
+                  << ctx->compute.descriptor_layout << std::endl;
+    }
+
+    if (ctx->compute.fft_command_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] FFT Command buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ FFT Command buffer: "
+                  << ctx->compute.fft_command_buffer << std::endl;
+    }
+
+    // Check all descriptor sets
+    for (int i = 0; i < 4; i++) {
+        if (ctx->compute.descriptor_sets[i] == VK_NULL_HANDLE) {
+            std::cerr << "[CANDY ERROR] Descriptor set " << i << " is NULL!" << std::endl;
+            all_valid = false;
+        } else {
+            std::cout << "[CANDY DEBUG] ✓ Descriptor set " << i << ": "
+                      << ctx->compute.descriptor_sets[i] << std::endl;
+        }
+    }
+
+    // Check pipeline layouts
+    for (int i = 0; i < 4; i++) {
+        if (ctx->compute.pipeline_layouts[i] == VK_NULL_HANDLE) {
+            std::cerr << "[CANDY ERROR] Pipeline layout " << i << " is NULL!"
+                      << std::endl;
+            all_valid = false;
+        } else {
+            std::cout << "[CANDY DEBUG] ✓ Pipeline layout " << i << ": "
+                      << ctx->compute.pipeline_layouts[i] << std::endl;
+        }
+    }
+
+    // Check pipelines
+    for (int i = 0; i < 4; i++) {
+        if (ctx->compute.pipelines[i] == VK_NULL_HANDLE) {
+            std::cerr << "[CANDY ERROR] Pipeline " << i << " is NULL!" << std::endl;
+            all_valid = false;
+        } else {
+            std::cout << "[CANDY DEBUG] ✓ Pipeline " << i << ": "
+                      << ctx->compute.pipelines[i] << std::endl;
+        }
+    }
+
+    // Check buffers
+    if (ctx->compute.psi_freq_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] psi_freq_buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ psi_freq_buffer: " << ctx->compute.psi_freq_buffer
+                  << std::endl;
+    }
+
+    if (ctx->compute.kinetic_factor_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] kinetic_factor_buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ kinetic_factor_buffer: "
+                  << ctx->compute.kinetic_factor_buffer << std::endl;
+    }
+
+    if (ctx->compute.potential_factor_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] potential_factor_buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ potential_factor_buffer: "
+                  << ctx->compute.potential_factor_buffer << std::endl;
+    }
+
+    if (ctx->compute.prob_density_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] prob_density_buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ prob_density_buffer: "
+                  << ctx->compute.prob_density_buffer << std::endl;
+    }
+
+    // Check command pool and buffer
+    if (ctx->compute.command_pool == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Command pool is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ Command pool: " << ctx->compute.command_pool
+                  << std::endl;
+    }
+
+    if (ctx->compute.command_buffer == VK_NULL_HANDLE) {
+        std::cerr << "[CANDY ERROR] Command buffer is NULL!" << std::endl;
+        all_valid = false;
+    } else {
+        std::cout << "[CANDY DEBUG] ✓ Command buffer: " << ctx->compute.command_buffer
+                  << std::endl;
+    }
+
+    if (all_valid) {
+        std::cout << "[CANDY DEBUG] ✓✓✓ ALL COMPUTE PIPELINE COMPONENTS VALID ✓✓✓"
+                  << std::endl;
+    } else {
+        std::cerr << "[CANDY ERROR] ✗✗✗ COMPUTE PIPELINE VALIDATION FAILED ✗✗✗"
+                  << std::endl;
+    }
+
+    std::cout << "[CANDY DEBUG] =============================================\n"
+              << std::endl;
+}
 
 VkShaderModule candy_create_compute_shader_module(VkDevice device, const char *filepath) {
     std::vector<char> code = candy_read_shader_file(filepath);
@@ -469,6 +1696,7 @@ VkShaderModule candy_create_compute_shader_module(VkDevice device, const char *f
     return shader_module;
 }
 
+/*
 void candy_create_compute_descriptor_layout(candy_context *ctx) {
     VkDescriptorSetLayoutBinding bindings[2] = {
         {
@@ -499,7 +1727,50 @@ void candy_create_compute_descriptor_layout(candy_context *ctx) {
         ctx->core.logical_device, &layout_info, nullptr, &ctx->compute.descriptor_layout);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute descriptor layout");
 }
+*/
 
+void candy_create_compute_descriptor_layout(candy_context *ctx) {
+    std::cout << "[CANDY DEBUG] Creating compute descriptor layout..." << std::endl;
+
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        },
+    };
+
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
+        .bindingCount = 2,
+        .pBindings = bindings,
+    };
+
+    VkResult result = vkCreateDescriptorSetLayout(
+        ctx->core.logical_device, &layout_info, nullptr, &ctx->compute.descriptor_layout);
+
+    if (result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to create descriptor layout: " << result
+                  << std::endl;
+        CANDY_ASSERT(false, "Failed to create compute descriptor layout");
+    }
+
+    std::cout << "[CANDY DEBUG] Descriptor layout created: "
+              << ctx->compute.descriptor_layout << std::endl;
+}
+
+/*
 void candy_create_compute_descriptor_pool(candy_context *ctx) {
     VkDescriptorPoolSize pool_size = {
         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -518,6 +1789,38 @@ void candy_create_compute_descriptor_pool(candy_context *ctx) {
     VkResult result = vkCreateDescriptorPool(ctx->core.logical_device, &pool_info,
                                              nullptr, &ctx->compute.descriptor_pool);
     CANDY_ASSERT(result == VK_SUCCESS, "Failed to create compute descriptor pool");
+}
+*/
+
+void candy_create_compute_descriptor_pool(candy_context *ctx) {
+    std::cout << "[CANDY DEBUG] Creating compute descriptor pool..." << std::endl;
+
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .descriptorCount = 8, // 2 bindings * 4 shaders
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, // Allow freeing
+                                                                    // individual sets
+        .maxSets = 4,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+    };
+
+    VkResult result = vkCreateDescriptorPool(ctx->core.logical_device, &pool_info,
+                                             nullptr, &ctx->compute.descriptor_pool);
+
+    if (result != VK_SUCCESS) {
+        std::cerr << "[CANDY ERROR] Failed to create descriptor pool: " << result
+                  << std::endl;
+        CANDY_ASSERT(false, "Failed to create compute descriptor pool");
+    }
+
+    std::cout << "[CANDY DEBUG] Descriptor pool created: " << ctx->compute.descriptor_pool
+              << std::endl;
 }
 
 void candy_create_compute_pipelines(candy_context *ctx) {
@@ -581,7 +1884,6 @@ void candy_create_compute_pipelines(candy_context *ctx) {
         vkDestroyShaderModule(ctx->core.logical_device, shader, nullptr);
     }
 }
-
 void candy_create_compute_command_pool(candy_context *ctx) {
     candy_queue_family_indices indices =
         candy_find_queue_families(ctx->core.physical_device, ctx->core.surface);
@@ -614,22 +1916,32 @@ void candy_init_compute_pipeline(candy_context *ctx) {
     candy_create_compute_descriptor_layout(ctx);
     candy_create_compute_descriptor_pool(ctx);
     candy_create_compute_buffers(ctx);
+    candy_create_prob_density_buffer(ctx);
     candy_create_compute_descriptor_sets(ctx);
     candy_create_compute_pipelines(ctx);
     candy_create_compute_command_pool(ctx);
+
+    candy_validate_compute_pipeline(ctx);
 
     std::cout << "[CANDY] Compute pipeline initialized\n";
 }
 
 void candy_cleanup_compute_pipeline(candy_context *ctx) {
+    candy_cleanup_vkfft(ctx);
+
     vkDestroyBuffer(ctx->core.logical_device, ctx->compute.psi_freq_buffer, nullptr);
     vkFreeMemory(ctx->core.logical_device, ctx->compute.psi_freq_memory, nullptr);
+
     vkDestroyBuffer(ctx->core.logical_device, ctx->compute.kinetic_factor_buffer,
                     nullptr);
     vkFreeMemory(ctx->core.logical_device, ctx->compute.kinetic_factor_memory, nullptr);
+
     vkDestroyBuffer(ctx->core.logical_device, ctx->compute.potential_factor_buffer,
                     nullptr);
     vkFreeMemory(ctx->core.logical_device, ctx->compute.potential_factor_memory, nullptr);
+
+    vkDestroyBuffer(ctx->core.logical_device, ctx->compute.prob_density_buffer, nullptr);
+    vkFreeMemory(ctx->core.logical_device, ctx->compute.prob_density_memory, nullptr);
 
     vkDestroyCommandPool(ctx->core.logical_device, ctx->compute.command_pool, nullptr);
 
@@ -1054,10 +2366,60 @@ void candy_record_command_buffer(candy_context *ctx, uint32_t image_index,
 
     VkBuffer vertex_buffers[] = {ctx->core.vertex_buffer};
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1,
-                           vertex_buffers, offsets);
+    // vkCmdBindVertexBuffers(ctx->frame_data.command_buffers[cmd_buf_indx], 0,
+    // 1,vertex_buffers, offsets);
 
-    vkCmdDraw(ctx->frame_data.command_buffers[cmd_buf_indx], 3, 1, 0, 0);
+    // vkCmdDraw(ctx->frame_data.command_buffers[cmd_buf_indx], 3,
+    // 1, 0, 0);
+
+    struct {
+        glm::mat4 viewProj;
+        float threshold;
+    } push_data;
+
+    struct complex_float {
+        float real;
+        float imaginary;
+    };
+
+    struct quant_state {
+        std::vector<complex_float> psi;
+        std::vector<float> potential;
+        std::vector<float> prob_dens;
+        std::vector<float> kx;
+        std::vector<float> ky;
+        std::vector<float> kz;
+        std::vector<float> k_squared;
+        std::vector<complex_float> kinetic_factor;
+        std::vector<complex_float> potential_factor;
+        float dx, dy, dz, time;
+        glm::mat4 view_proj_matrix;
+        float density_threshold;
+    };
+
+    if (ctx->game_module.game_state && ctx->core.particle_count > 0) {
+        quant_state *state = (quant_state *)ctx->game_module.game_state;
+        push_data.viewProj = state->view_proj_matrix;
+        push_data.threshold = state->density_threshold;
+    } else {
+        // Fallback: identity matrix
+        push_data.viewProj = glm::mat4(1.0f);
+        push_data.threshold = 0.001f;
+    }
+
+    // Push constants BEFORE binding vertex buffer
+    vkCmdPushConstants(ctx->frame_data.command_buffers[cmd_buf_indx],
+                       ctx->pipeline.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                       sizeof(push_data), &push_data);
+
+    if (ctx->core.particle_count > 0) {
+        VkBuffer particle_buffers[] = {ctx->core.particle_vertex_buffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(ctx->frame_data.command_buffers[cmd_buf_indx], 0, 1,
+                               particle_buffers, offsets);
+        vkCmdDraw(ctx->frame_data.command_buffers[cmd_buf_indx], ctx->core.particle_count,
+                  1, 0, 0);
+    }
     vkCmdEndRenderPass(ctx->frame_data.command_buffers[cmd_buf_indx]);
 
     candy_imgui_render(ctx, ctx->frame_data.command_buffers[cmd_buf_indx], image_index);
@@ -1415,8 +2777,11 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         .pDynamicStates = dynamic_states.data(),
     };
 
-    auto bindings_description = candy_vertex::get_bindings_description();
-    auto attribute_description = candy_vertex::get_attribute_description();
+    // auto bindings_description = candy_vertex::get_bindings_description();
+    // auto attribute_description = candy_vertex::get_attribute_description();
+
+    auto bindings_description = candy_particle::get_bindings_description();
+    auto attribute_description = candy_particle::get_attribute_description();
 
     VkPipelineVertexInputStateCreateInfo vertex_input_info = {
         // We can in future use this for vars inside vertex shader
@@ -1435,7 +2800,7 @@ void candy_create_graphics_pipeline(candy_context *candy) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
         .primitiveRestartEnable =
             VK_FALSE, //  possible to break up lines and triangles in the _STRIP topology
                       //  modes using index of 0xFFFF or 0xFFFFFFFF
@@ -1526,14 +2891,20 @@ void candy_create_graphics_pipeline(candy_context *candy) {
 
     };
 
+    VkPushConstantRange push_constant = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(glm::mat4) + sizeof(float), // mat4 viewProj + float threshold
+    };
+
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
         .setLayoutCount = 0,
         .pSetLayouts = nullptr,
-        .pushConstantRangeCount = 0,
-        .pPushConstantRanges = nullptr,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_constant,
     };
 
     VkResult result =
@@ -2130,6 +3501,17 @@ void candy_loop(candy_context *ctx) {
         if (ctx->game_module.api.update) {
             ctx->game_module.api.update(ctx, ctx->game_module.game_state, delta_time);
         }
+
+        if (ctx->game_module.game_state) {
+            std::cout << "[CANDY DEBUG] Starting quantum timestep..." << std::endl;
+            candy_quantum_timestep(ctx);
+            std::cout << "[CANDY DEBUG] Quantum timestep complete" << std::endl;
+
+            std::cout << "[CANDY DEBUG] Updating particles..." << std::endl;
+            candy_update_particle_vertices(ctx, ctx->game_module.game_state);
+            std::cout << "[CANDY DEBUG] Particles updated" << std::endl;
+        }
+
         if (ctx->game_module.api.render) {
             ctx->game_module.api.render(ctx, ctx->game_module.game_state);
         }

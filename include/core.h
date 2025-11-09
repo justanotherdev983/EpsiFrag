@@ -62,7 +62,7 @@ constexpr uint32_t MAX_FRAME_IN_FLIGHT = 2;
 #ifdef NDEBUG
 constexpr bool ENABLE_VALIDATION = false;
 #else
-constexpr bool ENABLE_VALIDATION = true;
+constexpr bool ENABLE_VALIDATION = false;
 #endif
 
 // ============================================================================
@@ -112,6 +112,10 @@ struct candy_core {
 
     VkBuffer vertex_buffer;
     VkDeviceMemory vertex_buffer_memory;
+
+    VkBuffer particle_vertex_buffer;
+    VkDeviceMemory particle_vertex_buffer_memory;
+    uint32_t particle_count;
 };
 
 // This is "warm" data. This is all recreated together when the window is resized.
@@ -167,6 +171,8 @@ struct candy_compute_pipeline {
     VkDeviceMemory kinetic_factor_memory;
     VkBuffer potential_factor_buffer;
     VkDeviceMemory potential_factor_memory;
+    VkBuffer prob_density_buffer;
+    VkDeviceMemory prob_density_memory;
 
     VkFFTConfiguration fft_config;
     VkFFTApplication fft_app_forward;
@@ -175,6 +181,9 @@ struct candy_compute_pipeline {
     VkDeviceMemory fft_buffer_memory;
 
     uint64_t buffer_size;
+
+    VkFence vkfft_fence;
+    VkCommandBuffer fft_command_buffer;
 };
 
 struct candy_game_api {
@@ -216,6 +225,13 @@ struct candy_context {
 
     // --- Hot reload ---
     candy_game_module game_module;
+
+    // TEMP: Graphics push constant data (updated by game)
+    struct {
+        glm::mat4 view_proj_matrix;
+        float density_threshold;
+        float _padding[3]; // Align to 16 bytes
+    } graphics_push_data;
 };
 
 // Helper for device selection
@@ -272,6 +288,34 @@ struct candy_vertex {
         return attribute_description;
     }
 };
+
+struct candy_particle {
+    glm::vec3 position;
+    float density;
+
+    static VkVertexInputBindingDescription get_bindings_description() {
+        return {.binding = 0,
+                .stride = sizeof(candy_particle),
+                .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> get_attribute_description() {
+        std::array<VkVertexInputAttributeDescription, 2> attributes {};
+
+        attributes[0] = {.location = 0,
+                         .binding = 0,
+                         .format = VK_FORMAT_R32G32B32_SFLOAT,
+                         .offset = offsetof(candy_particle, position)};
+
+        attributes[1] = {.location = 1,
+                         .binding = 0,
+                         .format = VK_FORMAT_R32_SFLOAT,
+                         .offset = offsetof(candy_particle, density)};
+
+        return attributes;
+    }
+};
+
 const std::vector<candy_vertex> vertices = {{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
                                             {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
                                             {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}};
